@@ -120,6 +120,43 @@ skillforge trust remove anthropic
 
 `find` 检测到安装命令时,若 owner 在白名单内,等价于自动加了 `--install`(仍会确认,加 `--yes` 才跳过)。文件:`~/.skillforge/trusted.txt`,可手工编辑,`#` 开头行为注释。
 
+### `/skill*` 命令体系(v3)
+
+skillforge 自身可以装成一个 agent skill,在 Claude Code / Codex 里通过 9 个 slash 命令直接调用:
+
+```bash
+python skillforge.py self-install   # 一次性自部署:写自身 SKILL.md + 9 个 slash 命令到所有装了 agent 的目录
+```
+
+之后在 agent chat 里:
+
+| Slash | 行为 |
+|---|---|
+| `/skill查找 <需求>` | LLM 流水线找 Top 3 推荐 |
+| `/skill安装 <编号或 owner/repo>` | 装一个,装完自动 `/skill介绍` |
+| `/skill列表` | 三段:🟢 普通 / 🟡 已定制 / ⚪ 被遮蔽,带编号 |
+| `/skill <编号>` 或 `/skill详情 <name>` | 看来源/安装命令/版本状态/定制历史 |
+| `/skill修改 <name> <需求>` | LLM 改源码,自动快照,显 diff,确认应用 |
+| `/skill回滚 <name> [--pristine]` | 默认 swap previous;`--pristine` 强制回 GitHub 原版 |
+| `/skill卸载 <name>` | 删软链 + 搬 backups/ |
+| `/skill介绍 <name>` | 一段中文口语化使用说明(有 LLM key 改写,无 key 模板) |
+| `/skill帮助` | 列所有 /skill* 命令 |
+
+### 版本三槽位(v3)
+
+修改过的 skill 永远保留三个版本:
+
+| 槽 | 内容 | 何时写 |
+|---|---|---|
+| 🟢 **pristine** | GitHub 拉下来的原版 | 安装时**写一次**,永不变 |
+| 🟡 **previous** | 上次修改完的版本 | 每次 `/skill修改` 前快照当前 |
+| 🔵 **current** | 当前在用 | 一直被 agent 看到 |
+
+`/skill回滚 <name>` 默认 **swap 模式** — current ↔ previous 互换(回滚后再回滚回到原状)。
+`/skill回滚 <name> --pristine` 强制回 GitHub 原版,当前 current 保存为 previous。
+
+存储:`~/.skillforge/versions/<name>/{pristine,previous}/` — **不在** agent 扫描路径里,绝不污染菜单。
+
 ### Consolidate(合并同名物理副本)
 
 如果你历史上分别给 `.claude/skills/` 和 `.codex/skills/` 装过同名技能,有 N 份物理拷贝、互不同步。`consolidate` 帮你统一:

@@ -43,6 +43,99 @@ CANONICAL_HOME = os.environ.get("SKILLFORGE_HOME", "~/.skillforge/skills")
 TRUSTED_FILE = os.environ.get("SKILLFORGE_TRUSTED", "~/.skillforge/trusted.txt")
 # 备份目录:agent 扫描目录里不能留 .bak,否则会被 harness 当成新技能注册
 BACKUP_HOME = os.environ.get("SKILLFORGE_BACKUPS", "~/.skillforge/backups")
+# 版本快照目录(三槽位:pristine / previous / current):不在 agent 扫描路径里
+SKILLFORGE_VERSIONS = os.environ.get("SKILLFORGE_VERSIONS", "~/.skillforge/versions")
+# 编号缓存:/skill列表 写入,/skill <n> 引用
+LAST_LIST_FILE = os.environ.get("SKILLFORGE_LAST_LIST", "~/.skillforge/.last_list.json")
+
+
+def save_last_list(mapping: dict):
+    """{1: 'asset-forge', 2: 'rembg', ...} 写盘。"""
+    p = Path(LAST_LIST_FILE).expanduser()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    # JSON key 必须是字符串
+    data = {"saved_at": int(_now()), "mapping": {str(k): v for k, v in mapping.items()}}
+    p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+def load_last_list() -> dict:
+    """读盘,30 天过期。返回 {int: str}。"""
+    p = Path(LAST_LIST_FILE).expanduser()
+    if not p.exists():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if _now() - (data.get("saved_at") or 0) > 30 * 86400:
+        return {}
+    return {int(k): v for k, v in (data.get("mapping") or {}).items()}
+
+
+def resolve_skill(name_or_num: str):
+    """传入"asset-forge"或"1",返回 skill 名字。找不到返回 None。"""
+    s = (name_or_num or "").strip()
+    if not s:
+        return None
+    if s.isdigit():
+        return load_last_list().get(int(s))
+    return s  # 直接当 name 用
+
+
+def _now() -> int:
+    import time as _time
+    return int(_time.time())
+
+
+def version_dir(name: str, slot: str) -> Path:
+    """返回 ~/.skillforge/versions/<name>/<slot>/ 的 Path,不创建。"""
+    return Path(SKILLFORGE_VERSIONS).expanduser() / name / slot
+
+
+def _copy_skill_into(src: Path, dest: Path):
+    """覆盖式复制 src 整个目录到 dest;dest 已存在先删。"""
+    import shutil
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(src, dest, symlinks=True)
+
+
+def save_pristine(name: str, skill_dir: Path):
+    """安装时调一次:把当前 skill_dir 整体存为 pristine。已存在则跳过(永不覆盖原版)。"""
+    pristine = version_dir(name, "pristine")
+    if pristine.exists():
+        return  # 永不覆盖
+    _copy_skill_into(skill_dir, pristine)
+
+
+def save_previous(name: str, skill_dir: Path):
+    """修改前调:把当前 skill_dir 存为 previous,覆盖旧 previous。"""
+    _copy_skill_into(skill_dir, version_dir(name, "previous"))
+
+
+def rollback_to_previous(name: str, skill_dir: Path):
+    """swap 形式:current ↔ previous 互换。回滚后再回滚 = undo/redo。"""
+    prev = version_dir(name, "previous")
+    if not prev.exists():
+        raise FileNotFoundError(f"没有 previous 版本可回滚:{prev}")
+    # 三步走: current → tmp ; previous → current ; tmp → previous
+    import shutil, tempfile
+    tmp = Path(tempfile.mkdtemp(prefix="skf_swap_"))
+    tmp_dir = tmp / "x"
+    _copy_skill_into(skill_dir, tmp_dir)
+    _copy_skill_into(prev, skill_dir)
+    _copy_skill_into(tmp_dir, prev)
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
+def rollback_to_pristine(name: str, skill_dir: Path):
+    """先把当前 current 存为 previous(保留可逆),然后 pristine → current。"""
+    pristine = version_dir(name, "pristine")
+    if not pristine.exists():
+        raise FileNotFoundError(f"没有 pristine 版本(可能不是 skillforge 装的):{pristine}")
+    save_previous(name, skill_dir)
+    _copy_skill_into(pristine, skill_dir)
 
 
 def backup_skill_dir(source_dir: Path) -> Path:
@@ -1179,25 +1272,61 @@ def confirm(prompt, assume_yes=False):
 
 
 # ----------------------------------------------------------------------------- 命令
+def _is_customized(name: str) -> bool:
+    """根据 SKILL.md description 是否含 ✨ 标识判断是否被客制化过。"""
+    p = Path(CANONICAL_HOME).expanduser() / name / "SKILL.md"
+    if not p.exists():
+        return False
+    meta = parse_frontmatter(p) or {}
+    return "✨" in (meta.get("description") or "")
+
+
 def cmd_list(args):
     skills, shadowed = scan_local()
     if not skills:
         print("(没有找到已安装的技能)")
         return
-    print(f"已安装技能 {len(skills)} 个(按 name 去重;活跃版本):\n")
+
+    # 分类:客制化的 vs 普通的
+    custom, regular = [], []
     for s in skills:
-        print(f"  ● {s.name}")
+        (custom if _is_customized(s.name) else regular).append(s)
+
+    # 统一编号:先 regular,再 custom,再 shadow
+    mapping = {}
+    n = 1
+    print(f"🟢 已装技能(普通)  {len(regular)} 个\n")
+    for s in regular:
+        mapping[n] = s.name
+        print(f"  [{n:>3}] {s.name}")
         if s.description:
-            print(f"      {s.description[:88]}")
-        print(f"      来源: {s.source}")
+            print(f"        {s.description[:88]}")
+        n += 1
+    if custom:
+        print(f"\n🟡 已定制(改过源码)  {len(custom)} 个")
+        for s in custom:
+            mapping[n] = s.name
+            print(f"  [{n:>3}] ✨ {s.name}")
+            if s.description:
+                # 去掉 ✨[已定制] 前缀只显示真 description
+                d = s.description.lstrip("✨").lstrip("[已定制]").lstrip().lstrip(":").lstrip()
+                print(f"        {d[:88]}")
+            n += 1
     if shadowed:
-        print(f"\n另有 {len(shadowed)} 份同名副本被遮蔽(同名时优先 SKILLFORGE_HOME > 用户级):")
+        print(f"\n⚪ 被遮蔽副本  {len(shadowed)} 个(同名时优先 SKILLFORGE_HOME > 用户级)")
         for s in shadowed:
             print(f"  ✕ {s.name}   {s.path}")
         print("  可以合并到 SKILLFORGE_HOME 后用软链统一,或删除冗余副本。")
+
+    save_last_list(mapping)
+    print(f"\n后续 `skillforge detail <编号>` 看详情,`skillforge install <编号|name|owner/repo>` 装。")
+
     if args.json:
         print("\n" + json.dumps(
-            {"active": [asdict(s) for s in skills], "shadowed": [asdict(s) for s in shadowed]},
+            {"regular": [asdict(s) for s in regular],
+             "custom": [asdict(s) for s in custom],
+             "shadowed": [asdict(s) for s in shadowed],
+             "numbering": {str(k): v for k, v in mapping.items()}},
             ensure_ascii=False, indent=2,
         ))
 
@@ -1217,6 +1346,640 @@ def cmd_which(args):
     print(f'❌ 本地没有能满足「{query}」的技能。')
     print(f'   运行  skillforge find "{query}"  去 GitHub 找一个并安装。')
     return False
+
+
+_MODIFY_SKIP_DIRS = {".git", ".skillforge", "node_modules", "__pycache__",
+                     ".venv", "venv", "dist", "build", ".next", ".cache"}
+
+
+def _collect_skill_files(skill_dir: Path, max_bytes: int = 200_000) -> dict:
+    """递归读 skill 目录所有文本文件,返回 {相对路径: 内容}。
+    跳过常见无关目录、跳过二进制、跳过 > max_bytes 的大文件。
+    """
+    out = {}
+    for root, dirs, files in os.walk(skill_dir):
+        dirs[:] = [d for d in dirs if d not in _MODIFY_SKIP_DIRS and not d.startswith(".")]
+        for f in files:
+            full = Path(root) / f
+            try:
+                if full.stat().st_size > max_bytes:
+                    continue
+                rel = full.relative_to(skill_dir).as_posix()
+                # 二进制保护:utf-8 解码失败就跳
+                try:
+                    out[rel] = full.read_text(encoding="utf-8")
+                except UnicodeDecodeError:
+                    continue
+            except OSError:
+                continue
+    return out
+
+
+def _llm_modify(files: dict, user_request: str):
+    """喂源码 + 需求,LLM 返回 changes 列表。无 key 或解析失败 → None。"""
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        return None
+    # 截断:每个文件最多 4000 字,最多 30 个文件
+    file_items = list(files.items())[:30]
+    dump = "\n\n".join(f"=== {p} ===\n{c[:4000]}" for p, c in file_items)
+    prompt = (
+        "用户想这样改一个 agent skill 的源码:\n\n"
+        f"需求: {user_request}\n\n"
+        f"下面是这个 skill 目录里的源文件(超 4000 字符已截断,共 {len(file_items)} 个):\n\n"
+        f"{dump}\n\n"
+        "请按需求做**最小**修改。规则:\n"
+        "- 只动需要改的文件\n"
+        "- SKILL.md 必须保留,可以微调 description / 触发词\n"
+        "- 不要删 LICENSE / README.md\n"
+        "- new_content 是完整的新文件内容(modify/create 必填,delete 不需要)\n\n"
+        "输出严格 JSON 数组,不要任何其他文字:\n"
+        '[{"path": "相对路径", "action": "modify"|"create"|"delete", "new_content": "完整新内容"}, ...]'
+    )
+    text = _llm_call(prompt, max_tokens=8000)
+    if not text:
+        return None
+    try:
+        arr = json.loads(_strip_code_fence(text))
+        if isinstance(arr, list):
+            return arr
+    except Exception as e:
+        print(f"  [warn] LLM 返回 JSON 解析失败: {e}", file=sys.stderr)
+    return None
+
+
+def _diff_changes(changes: list, skill_dir: Path) -> str:
+    """diff 文本(unified format)。create/delete 也展示。"""
+    import difflib
+    out = []
+    for ch in changes:
+        path = ch.get("path", "?")
+        action = ch.get("action", "modify")
+        full = skill_dir / path
+        if action == "delete":
+            out.append(f"\n--- a/{path}\n+++ /dev/null\n[删除整个文件]")
+            continue
+        new = ch.get("new_content") or ""
+        old = ""
+        is_new = not full.exists()
+        if not is_new:
+            try:
+                old = full.read_text(encoding="utf-8")
+            except Exception:
+                pass
+        diff = list(difflib.unified_diff(
+            old.splitlines(), new.splitlines(),
+            fromfile=("/dev/null" if is_new else f"a/{path}"),
+            tofile=f"b/{path}",
+            lineterm="",
+        ))
+        if diff:
+            out.append("\n".join(diff))
+        else:
+            out.append(f"--- a/{path}\n+++ b/{path}\n[内容无变化]")
+    return "\n".join(out)
+
+
+def _apply_changes(changes: list, skill_dir: Path):
+    """写盘。假设 save_previous 已经在外面调过了。"""
+    for ch in changes:
+        path = ch.get("path", "")
+        if not path:
+            continue
+        action = ch.get("action", "modify")
+        full = skill_dir / path
+        if action == "delete":
+            if full.exists():
+                full.unlink()
+            continue
+        full.parent.mkdir(parents=True, exist_ok=True)
+        full.write_text(ch.get("new_content") or "", encoding="utf-8")
+
+
+def _update_customization_meta(name: str, request: str):
+    """SKILL.md frontmatter:description 加 ✨[已定制] 前缀(如未加),append # customization-<ts>: <请求摘要>。"""
+    md = Path(CANONICAL_HOME).expanduser() / name / "SKILL.md"
+    if not md.exists():
+        return
+    text = md.read_text(encoding="utf-8", errors="replace")
+    if not text.startswith("---"):
+        return
+    end = text.find("\n---", 3)
+    if end < 0:
+        return
+    front_body = text[3:end]
+    rest = text[end + 4:]
+
+    new_lines = []
+    desc_done = False
+    for line in front_body.splitlines():
+        m = re.match(r"(\s*description\s*:\s*)(.*)", line)
+        if m and not desc_done:
+            prefix, value = m.group(1), m.group(2)
+            stripped = value.strip().strip('"').strip("'")
+            if "✨" not in stripped and "[已定制]" not in stripped:
+                new_value = f"✨[已定制] {stripped}"
+                new_lines.append(f"{prefix}{new_value}")
+            else:
+                new_lines.append(line)
+            desc_done = True
+        else:
+            new_lines.append(line)
+
+    ts = _now()
+    summary = (request or "").replace("\n", " ").strip()[:80]
+    new_lines.append(f"# customization-{ts}: {summary}")
+
+    new_front = "\n".join(new_lines)
+    md.write_text(f"---\n{new_front.lstrip(chr(10))}\n---{rest}", encoding="utf-8")
+
+
+def cmd_modify(args):
+    name = resolve_skill(args.target) if args.target else None
+    if not name:
+        print("❌ 需要指定 skill。用法:`skillforge modify <name|编号> \"需求\"`", file=sys.stderr)
+        return
+    skill_dir = Path(CANONICAL_HOME).expanduser() / name
+    if not skill_dir.exists():
+        print(f"❌ skill '{name}' 不存在 ({skill_dir})", file=sys.stderr)
+        return
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        print("❌ /skill修改 需要 ANTHROPIC_API_KEY(此功能依赖 LLM 改源码)", file=sys.stderr)
+        return
+    request = " ".join(args.request or []).strip()
+    if not request:
+        print("❌ 需要说明改什么:`skillforge modify <name> \"你要的改动\"`", file=sys.stderr)
+        return
+
+    print(f"📂 读 {skill_dir} 源码…")
+    files = _collect_skill_files(skill_dir)
+    if not files:
+        print("❌ 这个 skill 目录里没有可读源文件", file=sys.stderr)
+        return
+    total_chars = sum(len(c) for c in files.values())
+    print(f"   {len(files)} 个文件,共 {total_chars} 字符")
+
+    print(f"🤖 LLM 出修改方案…")
+    changes = _llm_modify(files, request)
+    if not changes:
+        print("❌ LLM 没出可用方案", file=sys.stderr)
+        return
+
+    print(f"\n=== 提议的修改 ({len(changes)} 个文件) ===")
+    diff_text = _diff_changes(changes, skill_dir)
+    SHOW = 6000
+    print(diff_text[:SHOW])
+    if len(diff_text) > SHOW:
+        print(f"\n[diff 太长,只显示前 {SHOW} 字符;应用前请确认你信任 LLM 输出]")
+
+    if not confirm(f"\n应用以上修改?(改前自动快照到 versions/{name}/previous/)", args.yes):
+        print("已取消。")
+        return
+
+    print(f"💾 快照当前到 versions/{name}/previous/")
+    save_previous(name, skill_dir)
+    print(f"✏️  应用修改…")
+    _apply_changes(changes, skill_dir)
+    _update_customization_meta(name, request)
+    print(f"\n✅ 改完。回滚用:`skillforge rollback {name}`")
+
+
+def cmd_rollback(args):
+    name = resolve_skill(args.target) if args.target else None
+    if not name:
+        print("用法: skillforge rollback <name|编号> [--pristine]", file=sys.stderr)
+        return
+    skill_dir = Path(CANONICAL_HOME).expanduser() / name
+    if not skill_dir.exists():
+        print(f"❌ skill '{name}' 不存在", file=sys.stderr)
+        return
+
+    pristine = version_dir(name, "pristine")
+    previous = version_dir(name, "previous")
+    print(f"💾 当前快照状态:")
+    print(f"   pristine (github 原版):  {'✓' if pristine.exists() else '✗ 缺失'}")
+    print(f"   previous (上一版):        {'✓' if previous.exists() else '✗ 缺失'}")
+
+    if args.pristine:
+        if not pristine.exists():
+            print("❌ 没有 pristine,无法回到原版(这个 skill 可能不是 skillforge 装的)", file=sys.stderr)
+            return
+        if not confirm(f"回到 GitHub 原版?当前 current 会保存为 previous(可再回滚一次)", args.yes):
+            print("已取消。")
+            return
+        rollback_to_pristine(name, skill_dir)
+        print(f"✅ {name} 已回到 GitHub 原版。再回滚(无 --pristine)会回到刚才被存的 previous。")
+    else:
+        if not previous.exists():
+            print("❌ 没有 previous(还没修改过)。要回到原版用:`skillforge rollback {name} --pristine`", file=sys.stderr)
+            return
+        if not confirm(f"swap 形式:current ↔ previous 互换?", args.yes):
+            print("已取消。")
+            return
+        rollback_to_previous(name, skill_dir)
+        print(f"✅ {name} swap 完成。再 rollback 一次回到原状。")
+
+    # 如果回滚后 current 里 description 已不含 ✨,我们不主动 unmark(用户回到原版仍知道改过)
+    # 如果想精确反映,需要 reparse + 改 frontmatter,这里 KISS。
+
+
+def cmd_uninstall(args):
+    name = resolve_skill(args.target) if args.target else None
+    if not name:
+        print("用法: skillforge uninstall <name|编号>", file=sys.stderr)
+        return
+    skill_dir = Path(CANONICAL_HOME).expanduser() / name
+    if not skill_dir.exists():
+        print(f"❌ skill '{name}' 不存在", file=sys.stderr)
+        return
+
+    targets_to_remove = []
+    for d in register_target_dirs():
+        p = Path(d).expanduser() / name
+        if p.exists() or p.is_symlink():
+            targets_to_remove.append(p)
+
+    versions_root = Path(SKILLFORGE_VERSIONS).expanduser() / name
+    has_versions = versions_root.exists()
+
+    print(f"将卸载 {name}:")
+    print(f"  删 agent 软链 {len(targets_to_remove)} 个:")
+    for p in targets_to_remove:
+        print(f"    - {p}")
+    print(f"  移 {skill_dir} → backups/")
+    if has_versions:
+        print(f"  移 {versions_root} → backups/(含 pristine/previous)")
+
+    if not confirm("\n确认卸载?", args.yes):
+        print("已取消。")
+        return
+
+    import shutil
+    # 1) rm agent 软链 / 目录
+    for p in targets_to_remove:
+        try:
+            if p.is_symlink() or p.is_file():
+                p.unlink()
+            else:
+                shutil.rmtree(p)
+            print(f"  🗑️  删 {p}")
+        except OSError as e:
+            print(f"  ⚠️ 删 {p} 失败: {e}", file=sys.stderr)
+
+    # 2) skills/<name> 搬到 backups/
+    try:
+        bak = backup_skill_dir(skill_dir)
+        print(f"  📦 skill 搬到 {bak}")
+    except Exception as e:
+        print(f"  ⚠️ 搬 skill 失败: {e}", file=sys.stderr)
+
+    # 3) versions/<name> 搬到 backups/
+    if has_versions:
+        try:
+            bak2 = Path(BACKUP_HOME).expanduser() / f"versions-{name}-{_now()}"
+            bak2.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(versions_root), str(bak2))
+            print(f"  📦 versions 搬到 {bak2}")
+        except Exception as e:
+            print(f"  ⚠️ 搬 versions 失败: {e}", file=sys.stderr)
+
+    # 4) 清理编号缓存里的引用
+    ll = load_last_list()
+    new_ll = {k: v for k, v in ll.items() if v != name}
+    if len(new_ll) != len(ll):
+        save_last_list(new_ll)
+
+    print(f"\n✅ {name} 已卸载。所有数据搬到 backups/,误删可恢复。")
+
+
+def cmd_help(args):
+    print("""
+/skill 命令体系 — 自然语言驱动的 agent skill 管理
+
+  skillforge which <需求>          查本地装没装过
+  skillforge find  <需求>          LLM 流水线找 Top 3 (含 Scorecard + OSV 安全审)
+  skillforge install <编号|owner/repo>  装一个,自动 intro
+  skillforge list                  看已装(普通 / 已定制 / 被遮蔽 三段 + 编号)
+  skillforge detail <编号|name>    看来源/安装命令/版本状态/定制历史
+  skillforge intro <name>          一段中文使用说明
+  skillforge modify <name> <需求>  LLM 改源码,自动快照,显 diff,确认应用
+  skillforge rollback <name> [--pristine]  回上一版或回 github 原版
+  skillforge uninstall <name>      删软链 + 搬 backups
+  skillforge trust list|add|remove <owner...>   信任白名单
+  skillforge consolidate [--dry-run]  合并同名物理副本到 SKILLFORGE_HOME
+  skillforge self-install          装自身 SKILL.md + 9 个 slash 命令到所有 agent
+  skillforge help                  本帮助
+
+数据布局:
+  ~/.skillforge/skills/           当前在用 (current)
+  ~/.skillforge/versions/<n>/     pristine + previous(三槽位)
+  ~/.skillforge/backups/          adoption/consolidate/uninstall 的备份
+  ~/.skillforge/trusted.txt       owner 白名单
+  ~/.skillforge/.last_list.json   /skill <编号> 引用缓存(30 天过期)
+
+通常用法: 在 agent 里说 /skill查找 你的需求 或直接描述,agent 会自动路由到对应命令。
+""")
+
+
+def detect_host() -> str:
+    """启发式推断当前 agent host。"""
+    if os.environ.get("CLAUDECODE") or os.environ.get("CLAUDE_CODE_SESSION_ID"):
+        return "claude-code"
+    if os.environ.get("CODEX_CLI") or os.environ.get("CODEX") or os.environ.get("OPENAI_CODEX"):
+        return "codex"
+    if os.environ.get("OPENCLAW"):
+        return "openclaw"
+    return "unknown"
+
+
+# (host_dir, commands_dir) — slash command 文件应该装到 commands_dir
+_HOST_LAYOUT = [
+    ("claude-code", Path("~/.claude/skills").expanduser(), Path("~/.claude/commands").expanduser()),
+    ("codex",       Path("~/.codex/skills").expanduser(),  Path("~/.codex/commands").expanduser()),
+    ("openclaw",    Path("~/.openclaw/skills").expanduser(), Path("~/.openclaw/commands").expanduser()),
+]
+
+
+def _skillforge_own_skill_md(skillforge_path: str) -> str:
+    """skillforge 自己的 SKILL.md frontmatter description 写成"自然语言触发型"。"""
+    return f"""---
+name: skillforge
+description: 跨 agent 技能闭环管理(查找/安装/列表/详情/修改/回滚/卸载/介绍)。触发:用户说"找一个/装一个/查一下/改一改/卸载.../查看 ... 的 skill / 技能 / 工具"。也通过 /skill查找 /skill列表 /skill 等 slash command 调用。
+---
+
+# skillforge
+
+跨 agent 技能闭环管理工具,把 GitHub 仓库 → SKILL.md → 三家 agent 同步装上。**所有命令的入口是**:
+
+```bash
+python {skillforge_path} <subcommand> [...]
+```
+
+## 何时用本技能
+
+当用户说类似这些话时调用本技能:
+- "帮我找一个能 X 的技能/工具/skill"
+- "我们装过能 X 的东西吗?"
+- "把刚装的 X 的源码改一下"
+- "看一下都装了哪些 skill"
+- "把 X 卸载了"
+
+## 怎么用
+
+详见 `python {skillforge_path} help`(列出所有 subcommand)和对应 slash command 模板:
+- /skill查找 <需求>
+- /skill安装 <编号|owner/repo>
+- /skill列表
+- /skill <编号>
+- /skill详情 <编号|name>
+- /skill修改 <编号|name> <需求>
+- /skill回滚 <name> [--pristine]
+- /skill卸载 <name>
+- /skill介绍 <name>
+- /skill帮助
+
+## 关键设计
+
+- **三维评分透明**:每个推荐附 R(相关性) / U(真实使用证据) / T(治理透明度) 三维分 + 风险标签
+- **OpenSSF Scorecard + OSV 漏洞库**:接入 Google + OpenSSF 安全评分 + 已知 CVE 库
+- **版本三槽位**:pristine (github 原版,永不变) + previous (上一版) + current (在用)
+- **trusted 白名单**:owner 在 `~/.skillforge/trusted.txt` 里的会自动允许 `--install`(运行 pip/npm install)
+- **adoption**:发现 agent 目录里已有手写精品 SKILL.md 会自动采用,不覆盖
+
+## 安全默认
+
+- star / clone / 安装命令 / 修改源码 / 卸载 都先 confirm,加 `--yes` 才跳过
+- 安装命令默认不跑,owner 进 trusted.txt 或加 --install 才跑
+- 修改源码前自动快照到 versions/<name>/previous/
+- 卸载时数据搬到 backups/ 不删
+"""
+
+
+def cmd_self_install(args):
+    """检测各 agent 目录,装 skillforge 自身的 SKILL.md + 9 个 slash command 文件。"""
+    script_path = Path(__file__).resolve()
+    print(f"📍 skillforge 在: {script_path}")
+    print(f"🔍 检测当前 host(env 启发式): {detect_host()}")
+
+    # 1) 装 skillforge 自己的 SKILL.md 到 SKILLFORGE_HOME
+    own_dir = Path(CANONICAL_HOME).expanduser() / "skillforge"
+    own_dir.mkdir(parents=True, exist_ok=True)
+    own_md = own_dir / "SKILL.md"
+    own_md.write_text(_skillforge_own_skill_md(str(script_path)), encoding="utf-8")
+    print(f"📝 写自身 SKILL.md: {own_md}")
+    # 保存 pristine
+    try:
+        save_pristine("skillforge", own_dir)
+    except Exception:
+        pass
+
+    # 2) 软链到各家 agent skills/
+    skills_link_results = register_skill(own_dir, link=not args.copy)
+    for tgt, how in skills_link_results:
+        print(f"🔗 SKILL.md 注册: {tgt}  ({how})")
+
+    # 3) 拷 9 个 slash 模板到各家 commands/
+    templates_dir = Path(__file__).resolve().parent / "slash_templates"
+    if not templates_dir.is_dir():
+        print(f"❌ slash 模板目录不存在: {templates_dir}", file=sys.stderr)
+        return
+    templates = sorted(templates_dir.glob("*.md"))
+    print(f"\n📂 准备 {len(templates)} 个 slash 模板:")
+    for t in templates:
+        print(f"   · {t.name}")
+
+    print(f"\n📤 部署到各 host 的 commands 目录:")
+    deployed = 0
+    for host, skills_dir, commands_dir in _HOST_LAYOUT:
+        if not skills_dir.exists():
+            continue
+        commands_dir.mkdir(parents=True, exist_ok=True)
+        for t in templates:
+            content = t.read_text(encoding="utf-8").replace("{SKILLFORGE_PATH}", str(script_path))
+            dest = commands_dir / t.name
+            try:
+                dest.write_text(content, encoding="utf-8")
+                deployed += 1
+            except OSError as e:
+                print(f"   ⚠️ {dest}: {e}", file=sys.stderr)
+        print(f"   ✓ {host}: {len(templates)} 个 → {commands_dir}")
+
+    print(f"\n✅ 完成。共部署 {deployed} 个 slash 文件。")
+    print(f"   在 Claude Code / Codex 里试试 /skill帮助 看完整命令清单。")
+    print(f"   注意:如果 /skill查找 等中文 slash 命令在某 agent 上不识别,可手动 mv 为 ASCII 名 (skill-find.md 等)。")
+
+
+def cmd_install(args):
+    """/skill安装:把 target 装下来。target 可以是:
+    - "owner/repo" → 直接 find --repo --yes
+    - "1" → 上次 list 的编号(注意:这种情况其实是已经装过的,要重装/更新得 force-new)
+    - 已装的 name → 提示"已装,看详情用 detail"
+    """
+    target = args.target
+    if not target:
+        print("用法: skillforge install <owner/repo|编号|name>", file=sys.stderr)
+        sys.exit(2)
+    if "/" in target:
+        # owner/repo 直接装
+        from argparse import Namespace
+        find_args = Namespace(
+            query=[target.split("/")[-1]],
+            repo=target,
+            top=3, yes=True, force_new=True,
+            no_star=args.no_star, install=args.install,
+            no_register=False, copy=False,
+            simple=True, no_readme=True,  # 走 simple,避免 LLM 又拉一轮
+        )
+        cmd_find(find_args)
+        # 装完自动 intro
+        name = re.sub(r"[^a-z0-9-]+", "-", target.split("/")[-1].lower()).strip("-")
+        print("\n" + "─" * 60)
+        intro_args = Namespace(name=name)
+        cmd_intro(intro_args)
+        return
+    # 数字编号或 name
+    resolved = resolve_skill(target)
+    if not resolved:
+        print(f"❌ 找不到 '{target}'。先 skillforge list 看编号,或直接给 owner/repo。", file=sys.stderr)
+        return
+    # 已装的情况
+    skill_dir = Path(CANONICAL_HOME).expanduser() / resolved
+    if skill_dir.exists():
+        print(f"ℹ️  {resolved} 已经装过了。看详情用:skillforge detail {resolved}")
+        return
+    print(f"❌ {resolved} 编号映射到了一个不存在的 skill,可能编号已过期。重跑 skillforge list 刷新。", file=sys.stderr)
+    """看一个 skill 的详情。args.target 可以是名字或编号。"""
+    name = resolve_skill(args.target)
+    if not name:
+        print(f"❌ 找不到 '{args.target}'。先 `skillforge list` 看编号,或直接给名字。", file=sys.stderr)
+        return
+    skill_dir = Path(CANONICAL_HOME).expanduser() / name
+    md = skill_dir / "SKILL.md"
+    if not md.exists():
+        print(f"❌ skill 不存在:{skill_dir}", file=sys.stderr)
+        return
+    meta = parse_frontmatter(md) or {"name": name, "description": ""}
+
+    # 找 source URL
+    body = md.read_text(encoding="utf-8", errors="replace")
+    source_m = re.search(r"https://github\.com/[\w.\-]+/[\w.\-]+", body)
+    source_url = source_m.group(0) if source_m else "(SKILL.md 里没记录)"
+
+    # 找安装命令
+    inst_m = re.search(r"```(?:bash|shell)?\s*\n(.+?)\n```", body, re.DOTALL)
+    install_cmd = inst_m.group(1).strip() if inst_m else "(SKILL.md 里没记录)"
+
+    # 三槽位是否存在
+    has_pristine = version_dir(name, "pristine").exists()
+    has_previous = version_dir(name, "previous").exists()
+
+    # 客制化历史
+    custom_history = meta.get("customizations") or "(无)"
+    # frontmatter 的 customizations 字段如果是 list,parse_frontmatter 当前只拿 string,这里简化
+    custom_marker = "✨ 已定制过" if "✨" in (meta.get("description") or "") else "(未定制)"
+
+    print(f"━━━ {name} ━━━\n")
+    print(f"📂 当前位置: {skill_dir}")
+    print(f"🌐 来源: {source_url}")
+    print(f"📥 安装命令: {install_cmd}")
+    print(f"🏷  定制状态: {custom_marker}")
+    print(f"💾 版本快照:")
+    print(f"     pristine (github 原版):  {'✓ 存在' if has_pristine else '✗ 缺失(可能不是 skillforge 装的)'}")
+    print(f"     previous (上次修改前):    {'✓ 存在(可 rollback)' if has_previous else '✗ 还没修改过'}")
+    print(f"     current (在用):           ✓")
+    print(f"\n📝 描述:\n{meta.get('description','(无)')}\n")
+    print(f"调用例子: 跟 agent 说\"用 {name} 帮我 ...\" 自动触发,或用 /skill介绍 {name} 看简介。")
+
+
+def _template_intro(meta: dict, body: str) -> str:
+    """无 LLM 的模板版 intro。提取 description + 第一个 install 命令 + 触发词。"""
+    desc = meta.get("description", "").strip()
+    name = meta.get("name", "?")
+    # 从 body 抠第一个 ```bash code block
+    m = re.search(r"```(?:bash|shell)?\s*\n(.+?)\n```", body, re.DOTALL)
+    install = m.group(1).strip() if m else "(见 SKILL.md)"
+    # 从 description 抠"触发:..." 段
+    trig_m = re.search(r"触发[:：](.+?)(?:[;；]|$)", desc)
+    triggers = trig_m.group(1).strip() if trig_m else "(看 SKILL.md description)"
+    desc_short = re.split(r"[。.]\s*触发", desc, 1)[0] + "。" if "触发" in desc else desc[:120]
+    return (
+        f"✨ **{name}** 装好了\n\n"
+        f"做什么:{desc_short}\n\n"
+        f"怎么触发:跟 agent 说\"{triggers}\"相关的话\n\n"
+        f"装法(已经替你装好了,这是参考):`{install}`"
+    )
+
+
+def _llm_intro(meta: dict, body: str) -> str:
+    """有 ANTHROPIC_API_KEY 时让模型把 intro 改成口语化。"""
+    text = _llm_call(
+        f"用一段 80-150 字的中文口语向用户介绍下面这个刚装好的 agent 技能,告诉他:\n"
+        f"1) 它能帮你做什么(一句话)\n"
+        f"2) 你说什么样的话会自动触发它\n"
+        f"3) 一个最常用的调用例子\n\n"
+        f"技能 frontmatter:\nname: {meta.get('name','')}\ndescription: {meta.get('description','')}\n\n"
+        f"SKILL.md 正文摘录(前 1500 字):\n{(body or '')[:1500]}\n\n"
+        f"只输出介绍正文,开头用 ✨ 作图标,不要其他元 markdown 头。",
+        max_tokens=500,
+    )
+    return text
+
+
+def cmd_detail(args):
+    """看一个 skill 的详情。args.target 可以是名字或编号。"""
+    name = resolve_skill(args.target)
+    if not name:
+        print(f"❌ 找不到 '{args.target}'。先 `skillforge list` 看编号,或直接给名字。", file=sys.stderr)
+        return
+    skill_dir = Path(CANONICAL_HOME).expanduser() / name
+    md = skill_dir / "SKILL.md"
+    if not md.exists():
+        print(f"❌ skill 不存在: {skill_dir}", file=sys.stderr)
+        return
+    meta = parse_frontmatter(md) or {"name": name, "description": ""}
+
+    body = md.read_text(encoding="utf-8", errors="replace")
+    source_m = re.search(r"https://github\.com/[\w.\-]+/[\w.\-]+", body)
+    source_url = source_m.group(0) if source_m else "(SKILL.md 里没记录)"
+    inst_m = re.search(r"```(?:bash|shell)?\s*\n(.+?)\n```", body, re.DOTALL)
+    install_cmd = inst_m.group(1).strip() if inst_m else "(SKILL.md 里没记录)"
+
+    has_pristine = version_dir(name, "pristine").exists()
+    has_previous = version_dir(name, "previous").exists()
+    is_custom = "✨" in (meta.get("description") or "")
+
+    print(f"━━━ {name} ━━━\n")
+    print(f"📂 当前位置: {skill_dir}")
+    print(f"🌐 来源: {source_url}")
+    print(f"📥 安装命令: {install_cmd}")
+    print(f"🏷  定制状态: {'✨ 已定制过' if is_custom else '(未定制)'}")
+    print(f"💾 版本快照:")
+    print(f"     pristine (github 原版): {'✓ 存在(可 rollback --pristine)' if has_pristine else '✗ 缺失'}")
+    print(f"     previous (上次修改前):   {'✓ 存在(可 rollback)' if has_previous else '✗ 还没修改过'}")
+    print(f"     current (在用):          ✓")
+    print(f"\n📝 描述:\n{meta.get('description','(无)')}\n")
+    print(f"调用例子: 跟 agent 说\"用 {name} ...\" 即可触发,或 `skillforge intro {name}` 看简介。")
+
+
+def cmd_intro(args):
+    name = args.name
+    skill_dir = Path(CANONICAL_HOME).expanduser() / name
+    md = skill_dir / "SKILL.md"
+    if not md.exists():
+        print(f"❌ 找不到 {md}", file=sys.stderr)
+        return
+    meta = parse_frontmatter(md) or {"name": name, "description": ""}
+    body = md.read_text(encoding="utf-8", errors="replace")
+    # 把 frontmatter 去掉
+    if body.startswith("---"):
+        end = body.find("\n---", 3)
+        if end > 0:
+            body = body[end + 4 :].lstrip()
+    text = None
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        text = _llm_intro(meta, body)
+    if not text:
+        text = _template_intro(meta, body)
+    print(text)
 
 
 def cmd_consolidate(args):
@@ -1438,7 +2201,19 @@ def _install_chosen(args, chosen: dict, token):
         for target, how in register_skill(skill_dir, link=not args.copy):
             print(f"  🔗 注册 {target}  ({how})")
 
-    print(f"\n✅ 完成。下次再问类似需求,会直接命中本地技能 `{name}`。")
+    # v3: 保存 pristine 版本(只在第一次安装时写,/skill修改 才有 baseline)
+    try:
+        save_pristine(name, skill_dir)
+    except Exception as e:
+        print(f"  [warn] 写 pristine 版本失败:{e}", file=sys.stderr)
+
+    print(f"\n✅ 完成。下次再问类似需求,会直接命中本地技能 `{name}`。\n")
+    # v3: 装完自动 intro
+    try:
+        from argparse import Namespace
+        cmd_intro(Namespace(name=name))
+    except Exception as e:
+        print(f"[warn] 自动 intro 失败,可手动跑 `skillforge intro {name}`: {e}", file=sys.stderr)
 
 
 def cmd_find_simple(args):
@@ -1673,6 +2448,45 @@ def build_parser():
     pc.add_argument("--dry-run", action="store_true", help="只显示计划不执行")
     pc.add_argument("--yes", action="store_true", help="跳过最后确认")
     pc.set_defaults(func=cmd_consolidate)
+
+    # v3 子命令
+    pi = sub.add_parser("intro", help="出一段中文使用说明")
+    pi.add_argument("name")
+    pi.set_defaults(func=cmd_intro)
+
+    pd = sub.add_parser("detail", help="看某个已装 skill 的详情(名字或编号)")
+    pd.add_argument("target", help="name 或 /skill列表 里的编号")
+    pd.set_defaults(func=cmd_detail)
+
+    pin = sub.add_parser("install", help="装一个(编号|name|owner/repo)")
+    pin.add_argument("target")
+    pin.add_argument("--no-star", action="store_true")
+    pin.add_argument("--install", action="store_true", help="允许执行安装命令")
+    pin.set_defaults(func=cmd_install)
+
+    pm = sub.add_parser("modify", help="LLM 改源码(需 ANTHROPIC_API_KEY)")
+    pm.add_argument("target", help="name 或编号")
+    pm.add_argument("request", nargs="+", help="改动需求(中文自然语言)")
+    pm.add_argument("--yes", action="store_true", help="跳过应用前的确认")
+    pm.set_defaults(func=cmd_modify)
+
+    pr = sub.add_parser("rollback", help="回滚已修改的 skill")
+    pr.add_argument("target")
+    pr.add_argument("--pristine", action="store_true", help="回到 GitHub 原版(默认 swap previous)")
+    pr.add_argument("--yes", action="store_true")
+    pr.set_defaults(func=cmd_rollback)
+
+    pu = sub.add_parser("uninstall", help="卸载一个 skill(数据搬 backups/ 不丢)")
+    pu.add_argument("target")
+    pu.add_argument("--yes", action="store_true")
+    pu.set_defaults(func=cmd_uninstall)
+
+    psi = sub.add_parser("self-install", help="装自身 SKILL.md + 9 个 slash 命令到所有 agent")
+    psi.add_argument("--copy", action="store_true", help="注册用复制而非软链")
+    psi.set_defaults(func=cmd_self_install)
+
+    ph = sub.add_parser("help", help="列所有 skill 命令的用法")
+    ph.set_defaults(func=cmd_help)
     return p
 
 

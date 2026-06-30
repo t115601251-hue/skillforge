@@ -469,6 +469,194 @@ class TestFetchOSV(unittest.TestCase):
             self.assertEqual(skillforge.fetch_osv_vulns("PyPI", "x"), [])
 
 
+class TestVersionSlots(unittest.TestCase):
+    """版本三槽位:pristine / previous / current。"""
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmp = tempfile.mkdtemp(prefix="skf_versions_test_")
+        self.versions_root = pathlib.Path(self.tmp) / "versions"
+        self.skill_dir = pathlib.Path(self.tmp) / "skills" / "demo"
+        self.skill_dir.mkdir(parents=True)
+        (self.skill_dir / "SKILL.md").write_text("v1 content", encoding="utf-8")
+        # 注入临时路径
+        self._orig = skillforge.SKILLFORGE_VERSIONS
+        skillforge.SKILLFORGE_VERSIONS = str(self.versions_root)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        skillforge.SKILLFORGE_VERSIONS = self._orig
+
+    def test_save_pristine_then_load(self):
+        skillforge.save_pristine("demo", self.skill_dir)
+        # 改原文件,pristine 不动
+        (self.skill_dir / "SKILL.md").write_text("v2 changed", encoding="utf-8")
+        pristine_dir = skillforge.version_dir("demo", "pristine")
+        self.assertEqual((pristine_dir / "SKILL.md").read_text(encoding="utf-8"), "v1 content")
+
+    def test_save_pristine_idempotent(self):
+        """已有 pristine 不被覆盖(只第一次安装时写)。"""
+        skillforge.save_pristine("demo", self.skill_dir)
+        (self.skill_dir / "SKILL.md").write_text("v2", encoding="utf-8")
+        skillforge.save_pristine("demo", self.skill_dir)  # 第二次调用应该跳过
+        pristine_dir = skillforge.version_dir("demo", "pristine")
+        self.assertEqual((pristine_dir / "SKILL.md").read_text(encoding="utf-8"), "v1 content")
+
+    def test_save_previous_then_rollback_swap(self):
+        # current = v2; previous = v1
+        (self.skill_dir / "SKILL.md").write_text("v2", encoding="utf-8")
+        skillforge.save_previous("demo", self.skill_dir)
+        # 现在 previous 保存了 v2;再改 current 为 v3
+        (self.skill_dir / "SKILL.md").write_text("v3", encoding="utf-8")
+        # 回滚 swap → current=v2, previous=v3
+        skillforge.rollback_to_previous("demo", self.skill_dir)
+        self.assertEqual((self.skill_dir / "SKILL.md").read_text(encoding="utf-8"), "v2")
+        prev = skillforge.version_dir("demo", "previous")
+        self.assertEqual((prev / "SKILL.md").read_text(encoding="utf-8"), "v3")
+        # 再回滚一次 → 回到 v3
+        skillforge.rollback_to_previous("demo", self.skill_dir)
+        self.assertEqual((self.skill_dir / "SKILL.md").read_text(encoding="utf-8"), "v3")
+
+    def test_rollback_to_pristine_preserves_current_as_previous(self):
+        (self.skill_dir / "SKILL.md").write_text("original", encoding="utf-8")
+        skillforge.save_pristine("demo", self.skill_dir)
+        (self.skill_dir / "SKILL.md").write_text("modified", encoding="utf-8")
+        skillforge.rollback_to_pristine("demo", self.skill_dir)
+        self.assertEqual((self.skill_dir / "SKILL.md").read_text(encoding="utf-8"), "original")
+        prev = skillforge.version_dir("demo", "previous")
+        self.assertEqual((prev / "SKILL.md").read_text(encoding="utf-8"), "modified")
+
+
+class TestIntro(unittest.TestCase):
+    def test_template_intro_extracts_fields(self):
+        meta = {
+            "name": "writing-helper",
+            "description": "AI 写作助手,支持多 LLM,适合学生/作家。触发:writing-helper、写作助手、ai写作;仓库 GeekyWizKid/writing-helper。",
+        }
+        body = "## 这个技能能做什么\n通用 AI 写作助手\n\n## 安装\n```bash\nnpm install\n```\n"
+        text = skillforge._template_intro(meta, body)
+        self.assertIn("writing-helper", text)
+        self.assertIn("AI 写作助手", text)
+        self.assertIn("npm install", text)
+
+
+class TestLastListCache(unittest.TestCase):
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmp = tempfile.mkdtemp(prefix="skf_lastlist_")
+        self._orig = skillforge.LAST_LIST_FILE
+        skillforge.LAST_LIST_FILE = str(pathlib.Path(self.tmp) / "ll.json")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        skillforge.LAST_LIST_FILE = self._orig
+
+    def test_save_and_load(self):
+        skillforge.save_last_list({1: "asset-forge", 2: "rembg"})
+        loaded = skillforge.load_last_list()
+        self.assertEqual(loaded[1], "asset-forge")
+        self.assertEqual(loaded[2], "rembg")
+
+    def test_resolve_by_number(self):
+        skillforge.save_last_list({1: "asset-forge", 2: "rembg"})
+        self.assertEqual(skillforge.resolve_skill("1"), "asset-forge")
+        self.assertEqual(skillforge.resolve_skill("rembg"), "rembg")
+
+    def test_resolve_unknown_number(self):
+        skillforge.save_last_list({1: "asset-forge"})
+        self.assertIsNone(skillforge.resolve_skill("99"))
+
+
+class TestModifyFlow(unittest.TestCase):
+    """cmd_modify 的纯函数部分:文件读取 / diff 应用 / frontmatter 改写。LLM 调用本身不测(走真 API)。"""
+    def setUp(self):
+        import tempfile, pathlib
+        self.tmp = tempfile.mkdtemp(prefix="skf_modify_")
+        self._orig_home = skillforge.CANONICAL_HOME
+        self._orig_versions = skillforge.SKILLFORGE_VERSIONS
+        skillforge.CANONICAL_HOME = str(pathlib.Path(self.tmp) / "skills")
+        skillforge.SKILLFORGE_VERSIONS = str(pathlib.Path(self.tmp) / "versions")
+        self.skill_dir = pathlib.Path(skillforge.CANONICAL_HOME).expanduser() / "demo"
+        self.skill_dir.mkdir(parents=True)
+        (self.skill_dir / "SKILL.md").write_text(
+            "---\nname: demo\ndescription: A demo skill for testing\n---\n# demo\n## install\n```bash\npip install demo\n```\n",
+            encoding="utf-8",
+        )
+        (self.skill_dir / "main.py").write_text("def hello():\n    print('hi')\n", encoding="utf-8")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        skillforge.CANONICAL_HOME = self._orig_home
+        skillforge.SKILLFORGE_VERSIONS = self._orig_versions
+
+    def test_collect_skill_files_finds_text(self):
+        files = skillforge._collect_skill_files(self.skill_dir)
+        self.assertIn("SKILL.md", files)
+        self.assertIn("main.py", files)
+
+    def test_collect_skips_git_dir(self):
+        gd = self.skill_dir / ".git"
+        gd.mkdir()
+        (gd / "config").write_text("dummy", encoding="utf-8")
+        files = skillforge._collect_skill_files(self.skill_dir)
+        # 任何含 .git 的路径都不能进
+        for p in files.keys():
+            self.assertNotIn(".git", p)
+
+    def test_apply_modify(self):
+        skillforge._apply_changes(
+            [{"path": "main.py", "action": "modify",
+              "new_content": "def hello():\n    print('hello world')\n"}],
+            self.skill_dir,
+        )
+        self.assertEqual(
+            (self.skill_dir / "main.py").read_text(encoding="utf-8"),
+            "def hello():\n    print('hello world')\n",
+        )
+
+    def test_apply_create(self):
+        skillforge._apply_changes(
+            [{"path": "new_file.py", "action": "create", "new_content": "# new\n"}],
+            self.skill_dir,
+        )
+        self.assertTrue((self.skill_dir / "new_file.py").exists())
+
+    def test_apply_delete(self):
+        skillforge._apply_changes(
+            [{"path": "main.py", "action": "delete"}],
+            self.skill_dir,
+        )
+        self.assertFalse((self.skill_dir / "main.py").exists())
+
+    def test_update_customization_marks_meta(self):
+        skillforge._update_customization_meta("demo", "make it output markdown by default")
+        text = (self.skill_dir / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("✨", text)
+        self.assertIn("[已定制]", text)
+        self.assertIn("customization-", text)
+
+    def test_update_customization_idempotent_for_prefix(self):
+        # 调两次 ✨ 不该叠加成 ✨✨[已定制] ✨[已定制]
+        skillforge._update_customization_meta("demo", "first edit")
+        skillforge._update_customization_meta("demo", "second edit")
+        text = (self.skill_dir / "SKILL.md").read_text(encoding="utf-8")
+        # description 行只有一处 ✨[已定制]
+        for line in text.splitlines():
+            if line.lstrip().startswith("description:"):
+                self.assertEqual(line.count("✨"), 1)
+                self.assertEqual(line.count("[已定制]"), 1)
+
+    def test_diff_changes_produces_unified(self):
+        changes = [{"path": "main.py", "action": "modify",
+                    "new_content": "def hello():\n    print('hello')\n"}]
+        diff = skillforge._diff_changes(changes, self.skill_dir)
+        self.assertIn("main.py", diff)
+        # unified diff 里至少有 -/+ 行
+        self.assertTrue("- " in diff or "-    " in diff or "---" in diff)
+
+
 class TestUScore(unittest.TestCase):
     def test_zero_signals(self):
         score = skillforge.compute_u_score(
