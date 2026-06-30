@@ -1777,35 +1777,57 @@ def cmd_self_install(args):
     for tgt, how in skills_link_results:
         print(f"🔗 SKILL.md 注册: {tgt}  ({how})")
 
-    # 3) 拷 9 个 slash 模板到各家 commands/
+    # 3) 拷 slash 模板到各家 commands/。中文文件名同时部署一份 ASCII 别名,
+    #    确保 Claude Code 自动补全下拉框能搜到(中文名 autocomplete 不友好)
     templates_dir = Path(__file__).resolve().parent / "slash_templates"
     if not templates_dir.is_dir():
         print(f"❌ slash 模板目录不存在: {templates_dir}", file=sys.stderr)
         return
     templates = sorted(templates_dir.glob("*.md"))
-    print(f"\n📂 准备 {len(templates)} 个 slash 模板:")
+    # 中文 → ASCII 映射
+    ASCII_ALIAS = {
+        "skill查找.md": "skill-find.md",
+        "skill列表.md": "skill-list.md",
+        "skill详情.md": "skill-info.md",
+        "skill安装.md": "skill-install.md",
+        "skill修改.md": "skill-modify.md",
+        "skill回滚.md": "skill-rollback.md",
+        "skill卸载.md": "skill-uninstall.md",
+        "skill介绍.md": "skill-intro.md",
+        "skill帮助.md": "skill-help.md",
+    }
+    print(f"\n📂 准备 {len(templates)} 个 slash 模板 + 各自的 ASCII 别名:")
     for t in templates:
-        print(f"   · {t.name}")
+        alias = ASCII_ALIAS.get(t.name)
+        if alias:
+            print(f"   · {t.name}  +  {alias}")
+        else:
+            print(f"   · {t.name}")
 
-    print(f"\n📤 部署到各 host 的 commands 目录:")
+    print(f"\n📤 部署到各 host 的 commands 目录(中文 + ASCII 别名都装,内容一样):")
     deployed = 0
     for host, skills_dir, commands_dir in _HOST_LAYOUT:
         if not skills_dir.exists():
             continue
         commands_dir.mkdir(parents=True, exist_ok=True)
+        count = 0
         for t in templates:
             content = t.read_text(encoding="utf-8").replace("{SKILLFORGE_PATH}", str(script_path))
-            dest = commands_dir / t.name
-            try:
-                dest.write_text(content, encoding="utf-8")
-                deployed += 1
-            except OSError as e:
-                print(f"   ⚠️ {dest}: {e}", file=sys.stderr)
-        print(f"   ✓ {host}: {len(templates)} 个 → {commands_dir}")
+            for name in [t.name, ASCII_ALIAS.get(t.name)]:
+                if not name:
+                    continue
+                dest = commands_dir / name
+                try:
+                    dest.write_text(content, encoding="utf-8")
+                    deployed += 1
+                    count += 1
+                except OSError as e:
+                    print(f"   ⚠️ {dest}: {e}", file=sys.stderr)
+        print(f"   ✓ {host}: {count} 个 → {commands_dir}")
 
-    print(f"\n✅ 完成。共部署 {deployed} 个 slash 文件。")
-    print(f"   在 Claude Code / Codex 里试试 /skill帮助 看完整命令清单。")
-    print(f"   注意:如果 /skill查找 等中文 slash 命令在某 agent 上不识别,可手动 mv 为 ASCII 名 (skill-find.md 等)。")
+    print(f"\n✅ 完成。共部署 {deployed} 个 slash 文件(每家中文+ASCII 双份)。")
+    print(f"   在 agent 输 / 时,中文型 (/skill帮助) 和 ASCII 型 (/skill-help) 都能用;")
+    print(f"   ASCII 那套能被自动补全下拉框搜到,中文那套适合直接敲。")
 
 
 # ----------------------------------------------------------------------------- v4: agent-as-LLM API
