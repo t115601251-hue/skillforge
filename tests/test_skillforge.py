@@ -263,6 +263,33 @@ class TestLLMRewrite(unittest.TestCase):
         self.assertEqual(r, ["批量去图片背景"])
 
 
+class TestCoarseRerank(unittest.TestCase):
+    def test_no_key_falls_back_to_score(self):
+        cands = [
+            {"full_name": "a/x", "description": "x", "language": "Py", "stargazers_count": 100,
+             "subscribers_count": 0, "forks_count": 0, "U": 50, "T": 80, "risk_flags": []},
+            {"full_name": "a/y", "description": "y", "language": "Py", "stargazers_count": 100,
+             "subscribers_count": 0, "forks_count": 0, "U": 80, "T": 30, "risk_flags": []},
+            {"full_name": "a/z", "description": "z", "language": "Py", "stargazers_count": 100,
+             "subscribers_count": 0, "forks_count": 0, "U": 90, "T": 90, "risk_flags": []},
+        ]
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+            top = skillforge.llm_coarse_rerank("q", cands)
+        self.assertEqual(top[0]["full_name"], "a/z")
+
+    def test_with_key_parses(self):
+        api_payload = {"content": [{"text": '[{"full_name": "a/y", "reason": "更相关"}, {"full_name": "a/z", "reason": "次之"}]'}]}
+        cands = [{"full_name": f"a/{n}", "description": n, "language": "Py",
+                  "stargazers_count": 1, "subscribers_count": 1, "forks_count": 1,
+                  "U": 1, "T": 1, "risk_flags": []} for n in ["x", "y", "z"]]
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "fake"}):
+            with mock.patch("urllib.request.urlopen") as urlopen:
+                urlopen.return_value = _mock_response(api_payload)
+                top = skillforge.llm_coarse_rerank("q", cands)
+        self.assertEqual([t["full_name"] for t in top], ["a/y", "a/z"])
+
+
 class TestUScore(unittest.TestCase):
     def test_zero_signals(self):
         score = skillforge.compute_u_score(

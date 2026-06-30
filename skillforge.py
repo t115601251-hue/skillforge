@@ -815,6 +815,50 @@ def llm_rewrite_query(query: str) -> list:
     return [query]
 
 
+def _coarse_heuristic(candidates: list) -> list:
+    """无 LLM 时的回退:0.6*U + 0.4*T 降序。"""
+    scored = [(c, 0.6 * (c.get("U") or 0) + 0.4 * (c.get("T") or 0)) for c in candidates]
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return [{"full_name": c["full_name"], "reason": f"启发式分 {s:.1f}"} for c, s in scored[:5]]
+
+
+def llm_coarse_rerank(query: str, candidates: list) -> list:
+    """N 个候选 → Top 5 (full_name + reason)。无 key 走启发式回退。"""
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        return _coarse_heuristic(candidates)
+
+    summary = [
+        {"full_name": c["full_name"], "desc": c.get("description", ""),
+         "language": c.get("language", ""), "stars": c.get("stargazers_count", 0),
+         "watchers": c.get("subscribers_count", 0), "forks": c.get("forks_count", 0),
+         "U": c.get("U"), "T": c.get("T"), "flags": c.get("risk_flags", [])}
+        for c in candidates
+    ]
+    prompt = (
+        f'用户中文需求: "{query}"\n\n'
+        f"下面是 {len(summary)} 个 GitHub 仓库的元数据。请挑出最可能解决用户需求的 5 个,以便下一步深度阅读 README。\n\n"
+        f"候选 (JSON):\n{json.dumps(summary, ensure_ascii=False)}\n\n"
+        "判断时:\n"
+        "- 相关性 > 一切,desc 跟需求毛都不沾的直接跳过\n"
+        "- 同等相关性下,U 高 (有真实用量) 优于 U 低\n"
+        "- T < 30 的尽量避免 (除非相关性远超其他)\n"
+        "- archived 必须排到最后\n\n"
+        '只输出 JSON 数组 (5 个), 不要其他文字:\n[{"full_name": "...", "reason": "<1 句中文,30 字内>"}, ...]\n'
+        "按推荐顺序排。"
+    )
+    text = _llm_call(prompt, max_tokens=600)
+    if not text:
+        return _coarse_heuristic(candidates)
+    try:
+        arr = json.loads(_strip_code_fence(text))
+        if isinstance(arr, list) and arr:
+            return [{"full_name": x["full_name"], "reason": x.get("reason", "")}
+                    for x in arr if isinstance(x, dict) and "full_name" in x][:5]
+    except Exception:
+        pass
+    return _coarse_heuristic(candidates)
+
+
 def fetch_downloads(ecosystem: str, name: str):
     """月下载量;失败/未知 ecosystem 返回 None。免认证公开端点。"""
     if not name:
