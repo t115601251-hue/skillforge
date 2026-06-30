@@ -102,6 +102,41 @@ class TestRiskFlags(unittest.TestCase):
         self.assertEqual(skillforge.compute_risk_flags(_healthy_meta()), [])
 
 
+class TestFetchMetadata(unittest.TestCase):
+    def test_combines_repo_contributors_releases(self):
+        repo_payload = {
+            "full_name": "danielgatis/rembg",
+            "description": "Background remover",
+            "archived": False,
+            "license": {"spdx_id": "MIT"},
+            "default_branch": "main",
+            "stargazers_count": 18000, "subscribers_count": 320, "forks_count": 1900,
+            "topics": ["bg", "ai"], "has_issues": True,
+            "pushed_at": "2026-06-15T00:00:00Z",
+            "created_at": "2020-01-01T00:00:00Z",
+            "owner": {"type": "User", "login": "danielgatis"},
+            "language": "Python",
+            "clone_url": "https://github.com/danielgatis/rembg.git",
+            "html_url": "https://github.com/danielgatis/rembg",
+        }
+        contribs = [{"login": "a"}, {"login": "b"}, {"login": "c"}, {"login": "d"}]
+        releases_link = {"link": '<https://api.github.com/x?page=22>; rel="last"'}
+
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            urlopen.side_effect = [
+                _mock_response(repo_payload),
+                _mock_response(contribs),
+                _mock_response([{"tag_name": "v1.0"}], headers=releases_link),
+            ]
+            meta = skillforge.fetch_metadata("danielgatis/rembg", token="xxx")
+
+        self.assertEqual(meta["full_name"], "danielgatis/rembg")
+        self.assertGreaterEqual(meta["contributors_count"], 3)
+        self.assertEqual(meta["release_count"], 22)
+        self.assertGreaterEqual(meta["T"], 70)
+        self.assertNotIn("🔴 已归档", meta["risk_flags"])
+
+
 class TestUScore(unittest.TestCase):
     def test_zero_signals(self):
         score = skillforge.compute_u_score(

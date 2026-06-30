@@ -664,6 +664,46 @@ def compute_t_score(meta: dict) -> int:
     return max(0, min(100, score))
 
 
+def _parse_last_page(link_header: str) -> int:
+    """从 GitHub Link header 解析 rel='last' 的 page 号。没有就返回 1。"""
+    m = re.search(r'<[^>]*[?&]page=(\d+)[^>]*>;\s*rel="last"', link_header or "")
+    return int(m.group(1)) if m else 1
+
+
+def fetch_metadata(full_name: str, token=None) -> dict:
+    """抓 spec §6.1 全部字段,顺手算 T 分 + flags 一起返回。
+    失败的子请求降级:contributors_count → 1,release_count → 0。
+    """
+    _, repo = gh_request(f"/repos/{full_name}", token)
+
+    try:
+        _, contribs = gh_request(f"/repos/{full_name}/contributors?per_page=4&anon=true", token)
+        contributors_count = len(contribs) if isinstance(contribs, list) else 1
+    except Exception:
+        contributors_count = 1
+
+    try:
+        url = GITHUB_API + f"/repos/{full_name}/releases?per_page=1"
+        headers = {"Accept": "application/vnd.github+json", "User-Agent": "skillforge",
+                   "X-GitHub-Api-Version": "2022-11-28"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        req = urllib.request.Request(url, method="GET", headers=headers)
+        with urllib.request.urlopen(req, timeout=30) as r:
+            link = r.headers.get("link", "")
+            body = json.loads(r.read() or b"[]")
+        release_count = _parse_last_page(link) if link else len(body)
+    except Exception:
+        release_count = 0
+
+    meta = dict(repo)
+    meta["contributors_count"] = contributors_count
+    meta["release_count"] = release_count
+    meta["T"] = compute_t_score(meta)
+    meta["risk_flags"] = compute_risk_flags(meta)
+    return meta
+
+
 def compute_u_score(*, stars: int, watchers: int, forks: int,
                     downloads, release_count: int, close_rate) -> int:
     """使用度 0-100。spec §5.2。downloads/close_rate 允许 None。"""
