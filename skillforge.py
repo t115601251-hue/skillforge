@@ -627,8 +627,11 @@ def _age_days(iso_ts: str) -> int:
         return 99999
 
 
-def compute_t_score(meta: dict) -> int:
-    """治理透明度 0-100。spec §5.1。"""
+def compute_t_score(meta: dict, scorecard=None, osv_vulns=None) -> int:
+    """治理透明度 0-100。spec §5.1 + v2 增补 §3。
+    scorecard: fetch_scorecard 返回的 dict 或 None
+    osv_vulns: fetch_osv_vulns 返回的 list 或 None
+    """
     if meta.get("archived"):
         return 0
 
@@ -660,6 +663,14 @@ def compute_t_score(meta: dict) -> int:
         score -= 20
     if _age_days(meta.get("pushed_at", "")) > 365:
         score -= 10
+
+    # v2 增补:Scorecard bonus + OSV 严重漏洞 penalty
+    if scorecard and isinstance(scorecard.get("score"), (int, float)):
+        score += int(round(scorecard["score"]))  # 0-10 直接加
+    if osv_vulns:
+        n_critical = sum(1 for v in osv_vulns
+                         if (v.get("severity") or "").upper() in {"HIGH", "CRITICAL"})
+        score -= min(50, 30 * n_critical)
 
     return max(0, min(100, score))
 
@@ -968,11 +979,75 @@ def render_top3(query: str, ranked: list, meta_by_name: dict, trusted_set: set) 
             f"📦 {m.get('release_count',0)} release  "
             f"💬 {rate_str} 闭合"
         )
+        # v2: Scorecard + OSV 安全行
+        sc = m.get("scorecard")
+        if sc is None:
+            sc_str = "🛡 Scorecard 无收录"
+        else:
+            sc_str = f"🛡 Scorecard {sc.get('score','?')}/10"
+        osv = m.get("osv_vulns") or []
+        n_crit = sum(1 for v in osv if (v.get("severity") or "").upper() in {"HIGH", "CRITICAL"})
+        if not osv:
+            osv_str = "OSV 0 vuln"
+        elif n_crit:
+            osv_str = f"OSV ⚠️ {n_crit} HIGH/CRITICAL ({len(osv)} 总)"
+        else:
+            osv_str = f"OSV {len(osv)} 低中危"
+        lines.append(f"      {sc_str}  ·  {osv_str}")
         lines.append(f"      推荐: {item.get('why','')}")
         risks = item.get("risks") or []
         lines.append(f"      风险: {'  '.join(risks) if risks else '(无)'}")
         lines.append(f"      装: {install_str}     owner ∈ trusted? {trusted}\n")
     return "\n".join(lines)
+
+
+_SCORECARD_API = "https://api.securityscorecards.dev/projects/github.com"
+_OSV_API = "https://api.osv.dev/v1/query"
+# 我们 ecosystem 命名 → OSV 期望命名
+_OSV_ECO = {"pypi": "PyPI", "npm": "npm", "cargo": "crates.io"}
+
+
+def fetch_osv_vulns(ecosystem: str, name: str) -> list:
+    """OSV 查包漏洞。返回简化后的 list:[{id, severity, summary}, ...]。失败/无 hit → []。"""
+    if not name:
+        return []
+    osv_eco = _OSV_ECO.get((ecosystem or "").lower(), ecosystem)
+    if osv_eco not in {"PyPI", "npm", "crates.io"}:
+        return []
+    body = json.dumps({"package": {"name": name, "ecosystem": osv_eco}}).encode()
+    req = urllib.request.Request(_OSV_API, data=body, method="POST",
+                                 headers={"content-type": "application/json", "User-Agent": "skillforge"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = json.loads(r.read())
+    except Exception:
+        return []
+
+    out = []
+    for v in (data.get("vulns") or []):
+        sev = (v.get("database_specific") or {}).get("severity") or ""
+        if not sev:
+            # 退到 CVSS:取最高 severity 数字推断等级
+            for s in (v.get("severity") or []):
+                score = s.get("score") or ""
+                if "/" in score:  # CVSS string
+                    sev = "HIGH"  # 粗略归类
+                    break
+        out.append({"id": v.get("id", "?"), "severity": (sev or "UNKNOWN").upper(), "summary": (v.get("summary") or "")[:120]})
+    return out
+
+
+def fetch_scorecard(full_name: str):
+    """拉 OpenSSF Scorecard 数据。仓库未收录/网络失败 → None。"""
+    if not full_name or "/" not in full_name:
+        return None
+    url = f"{_SCORECARD_API}/{full_name}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "skillforge", "Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return json.loads(r.read())
+    except Exception:
+        return None
 
 
 def fetch_downloads(ecosystem: str, name: str):
@@ -1037,8 +1112,8 @@ def compute_u_score(*, stars: int, watchers: int, forks: int,
     return int(round(max(0, min(100, w_s + w_w + w_f + w_d + w_r + w_c))))
 
 
-def compute_risk_flags(meta: dict) -> list:
-    """风险标签 list。spec §5.3。"""
+def compute_risk_flags(meta: dict, scorecard=None, osv_vulns=None) -> list:
+    """风险标签 list。spec §5.3 + v2 增补 §3。"""
     if meta.get("archived"):
         return ["🔴 已归档"]
 
@@ -1062,6 +1137,32 @@ def compute_risk_flags(meta: dict) -> list:
         flags.append("🟡 没开 issues")
     if (meta.get("release_count") or 0) == 0 and age_create > 180:
         flags.append("🟡 无 release")
+
+    # v2 增补:OSV 漏洞
+    if osv_vulns:
+        crit = [v for v in osv_vulns
+                if (v.get("severity") or "").upper() in {"HIGH", "CRITICAL"}]
+        if crit:
+            flags.append(f"🔴 OSV: {len(crit)} 个未修复的 HIGH/CRITICAL 漏洞")
+
+    # v2 增补:Scorecard 总分 + 关键子项
+    if scorecard and isinstance(scorecard.get("score"), (int, float)):
+        if scorecard["score"] < 4:
+            flags.append(f"🔴 Scorecard 总分 {scorecard['score']}/10(安全实践薄弱)")
+        # 子项 check
+        chk = {c.get("name"): c for c in (scorecard.get("checks") or [])}
+        bp = chk.get("Branch-Protection")
+        if bp and (bp.get("score") or 0) < 5:
+            flags.append("🟡 未启用 branch protection")
+        ba = chk.get("Binary-Artifacts")
+        if ba and (ba.get("score") or 0) < 10:
+            flags.append("🟡 仓库内有 binary artifacts")
+        dw = chk.get("Dangerous-Workflow")
+        if dw and (dw.get("score") or 0) < 10:
+            flags.append("🟡 CI workflow 含危险 pattern")
+        du = chk.get("Dependency-Update-Tool")
+        if du and (du.get("score") or 0) < 5:
+            flags.append("🟡 无依赖更新工具(Dependabot/Renovate)")
 
     return flags
 
@@ -1474,14 +1575,16 @@ def cmd_find(args):
     top5_names = [r["full_name"] for r in top5_refs]
     top5 = [m for m in enriched if m["full_name"] in top5_names]
 
-    # 6) 深读 Top 5:README + close_rate + 包下载量(可选跳过)
+    # 6) 深读 Top 5:README + close_rate + 包下载量 + Scorecard + OSV(可选跳过)
     if not args.no_readme:
-        print("   深读 Top 5…")
+        print("   深读 Top 5(README + close_rate + 下载量 + Scorecard + OSV)…")
         for m in top5:
             m["readme_excerpt"] = fetch_readme(m["full_name"], token)
             m["close_rate"] = fetch_close_rate(m["full_name"], token)
             pkg = guess_package_name(m["full_name"], m.get("default_branch", "main"), m.get("language", ""))
             m["monthly_downloads"] = fetch_downloads(pkg["ecosystem"], pkg["name"]) if pkg else None
+            m["scorecard"] = fetch_scorecard(m["full_name"])
+            m["osv_vulns"] = fetch_osv_vulns(pkg["ecosystem"], pkg["name"]) if pkg else []
             # 重算 U
             m["U"] = compute_u_score(
                 stars=m.get("stargazers_count", 0),
@@ -1491,12 +1594,17 @@ def cmd_find(args):
                 release_count=m.get("release_count", 0),
                 close_rate=m["close_rate"],
             )
+            # 重算 T 把 scorecard + osv 接进去,risk_flags 同样更新
+            m["T"] = compute_t_score(m, scorecard=m["scorecard"], osv_vulns=m["osv_vulns"])
+            m["risk_flags"] = compute_risk_flags(m, scorecard=m["scorecard"], osv_vulns=m["osv_vulns"])
             m["install_cmds"] = _guess_install(m.get("language", ""))
     else:
         for m in top5:
             m["readme_excerpt"] = ""
             m["close_rate"] = None
             m["monthly_downloads"] = None
+            m["scorecard"] = None
+            m["osv_vulns"] = []
             m["install_cmds"] = _guess_install(m.get("language", ""))
 
     # 7) LLM 终排 → Top 3

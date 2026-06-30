@@ -169,6 +169,7 @@ skillforge consolidate --yes       # 执行:挑权威版(已在 SKILLFORGE_HOME 
 - **star、装包默认先确认**,不闷头执行;
 - **安装命令默认不自动跑**,先把检测到的命令打印给你看,确认安全后才用 `--install`(或加 owner 到 `trusted.txt` 白名单);
 - **三维评分透明化**:每个推荐候选都附 **R** 相关性(LLM 读 README 打 0-10)、**U** 真实使用证据(stars/watchers/forks/月下载量/release/issue 闭合率融合 0-100)、**T** 治理透明度(LICENSE/活跃度/单一维护者/archived/star farming 等 0-100)三维分 + 风险标签;archived 必扣 T 到 0,star farming 嫌疑、新仓库、单一维护者、无 LICENSE 都用 🟡 标记;
+- **接入 OpenSSF Scorecard + OSV 漏洞库(v2)**:Top 5 候选额外调 [api.securityscorecards.dev](https://api.securityscorecards.dev) 拿 Google + OpenSSF 出的 0-10 安全治理分(含 Branch-Protection / Binary-Artifacts / Dangerous-Workflow / Dependency-Update / SAST / Signed-Releases 等 18 项检查),加 [api.osv.dev](https://api.osv.dev) 查包已知 HIGH/CRITICAL 漏洞。Scorecard 总分 < 4 标 🔴,关键子项失败标 🟡,OSV 命中 HIGH/CRITICAL 标 🔴(实测能拦下"lodash 2 个未修高危"、"ripgrep 1 个未修 CRITICAL OS 命令注入"这种主流项目里的真问题)。详见 [specs/2026-06-30-skill-search-quality-v2-security.md](specs/2026-06-30-skill-search-quality-v2-security.md)。
 - 生成的 SKILL.md 里附带"使用前请审阅仓库代码与依赖"提示;
 - token 只从环境变量读,**绝不硬编码**。
 

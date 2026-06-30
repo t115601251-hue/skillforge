@@ -85,6 +85,71 @@ class TestTScore(unittest.TestCase):
         self.assertLess(skillforge.compute_t_score(meta), 30)
 
 
+class TestTScoreWithScorecard(unittest.TestCase):
+    def test_scorecard_adds_bonus(self):
+        base = skillforge.compute_t_score(_healthy_meta())
+        with_sc = skillforge.compute_t_score(_healthy_meta(),
+                                              scorecard={"score": 8.5, "checks": []})
+        self.assertGreater(with_sc, base)
+        # bonus ≈ 8.5 → +9 (rounded), clamped at 100
+        self.assertLessEqual(with_sc, 100)
+
+    def test_scorecard_none_equals_v1(self):
+        v1 = skillforge.compute_t_score(_healthy_meta())
+        v2 = skillforge.compute_t_score(_healthy_meta(), scorecard=None, osv_vulns=None)
+        self.assertEqual(v1, v2)
+
+    def test_osv_critical_penalty(self):
+        base = skillforge.compute_t_score(_healthy_meta())
+        with_vulns = skillforge.compute_t_score(
+            _healthy_meta(),
+            osv_vulns=[{"id": "GHSA-x", "severity": "CRITICAL", "summary": ""}] * 2,
+        )
+        self.assertLessEqual(with_vulns, base - 50)  # 2 crits → -60 → 封顶 -50
+
+    def test_osv_low_no_penalty(self):
+        base = skillforge.compute_t_score(_healthy_meta())
+        with_low = skillforge.compute_t_score(
+            _healthy_meta(),
+            osv_vulns=[{"id": "x", "severity": "LOW", "summary": ""}],
+        )
+        self.assertEqual(with_low, base)
+
+
+class TestRiskFlagsExtended(unittest.TestCase):
+    def test_osv_red_flag(self):
+        flags = skillforge.compute_risk_flags(
+            _healthy_meta(),
+            osv_vulns=[{"id": "GHSA-x", "severity": "CRITICAL", "summary": "RCE"}],
+        )
+        self.assertTrue(any("OSV" in f and "CRITICAL" in f.upper() for f in flags))
+
+    def test_scorecard_low_red(self):
+        flags = skillforge.compute_risk_flags(
+            _healthy_meta(),
+            scorecard={"score": 2.5, "checks": []},
+        )
+        self.assertTrue(any("Scorecard" in f and "2.5" in f for f in flags))
+
+    def test_branch_protection_yellow(self):
+        flags = skillforge.compute_risk_flags(
+            _healthy_meta(),
+            scorecard={"score": 8.0, "checks": [
+                {"name": "Branch-Protection", "score": 0, "reason": "off"},
+            ]},
+        )
+        self.assertTrue(any("branch protection" in f.lower() for f in flags))
+
+    def test_binary_artifacts_yellow(self):
+        flags = skillforge.compute_risk_flags(
+            _healthy_meta(),
+            scorecard={"score": 8.0, "checks": [
+                {"name": "Binary-Artifacts", "score": 5, "reason": "found"},
+            ]},
+        )
+        self.assertTrue(any("binary" in f.lower() for f in flags))
+
+
 class TestRiskFlags(unittest.TestCase):
     def test_archived_red(self):
         flags = skillforge.compute_risk_flags(_healthy_meta(archived=True))
@@ -349,6 +414,59 @@ class TestRenderTop3(unittest.TestCase):
         text = skillforge.render_top3("q", ranked, meta, trusted_set=set())
         self.assertIn("仓库太新", text)
         self.assertIn("单一维护者", text)
+
+
+class TestFetchScorecard(unittest.TestCase):
+    def test_returns_score_and_checks(self):
+        payload = {
+            "score": 6.5,
+            "checks": [
+                {"name": "Binary-Artifacts", "score": 10, "reason": "no binaries"},
+                {"name": "Branch-Protection", "score": 0, "reason": "not enabled"},
+            ],
+        }
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            urlopen.return_value = _mock_response(payload)
+            r = skillforge.fetch_scorecard("danielgatis/rembg")
+        self.assertEqual(r["score"], 6.5)
+        self.assertEqual(len(r["checks"]), 2)
+
+    def test_404_returns_none(self):
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=urllib.error.HTTPError("u", 404, "x", {}, None)):
+            self.assertIsNone(skillforge.fetch_scorecard("no/such-repo"))
+
+    def test_network_error_returns_none(self):
+        with mock.patch("urllib.request.urlopen", side_effect=OSError("dns fail")):
+            self.assertIsNone(skillforge.fetch_scorecard("a/b"))
+
+
+class TestFetchOSV(unittest.TestCase):
+    def test_no_vulns(self):
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            urlopen.return_value = _mock_response({"vulns": []})
+            r = skillforge.fetch_osv_vulns("PyPI", "rembg")
+        self.assertEqual(r, [])
+
+    def test_returns_critical_vulns(self):
+        payload = {"vulns": [
+            {"id": "GHSA-aaa", "summary": "RCE", "database_specific": {"severity": "CRITICAL"}},
+            {"id": "GHSA-bbb", "summary": "info leak", "database_specific": {"severity": "MODERATE"}},
+        ]}
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            urlopen.return_value = _mock_response(payload)
+            r = skillforge.fetch_osv_vulns("PyPI", "vulnerable-pkg")
+        self.assertEqual(len(r), 2)
+        crits = [v for v in r if v["severity"] == "CRITICAL"]
+        self.assertEqual(len(crits), 1)
+        self.assertEqual(crits[0]["id"], "GHSA-aaa")
+
+    def test_unknown_ecosystem_returns_empty(self):
+        self.assertEqual(skillforge.fetch_osv_vulns("conda", "x"), [])
+
+    def test_network_error_returns_empty(self):
+        with mock.patch("urllib.request.urlopen", side_effect=OSError("fail")):
+            self.assertEqual(skillforge.fetch_osv_vulns("PyPI", "x"), [])
 
 
 class TestUScore(unittest.TestCase):
