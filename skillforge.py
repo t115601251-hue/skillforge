@@ -610,6 +610,89 @@ def register_skill(skill_dir: Path, link=True):
     return results
 
 
+# ----------------------------------------------------------------------------- find pipeline
+import datetime
+import math
+
+
+def _age_days(iso_ts: str) -> int:
+    """ISO 8601 字符串(GitHub 给的)→ 现在距它过了多少天。失败返回 99999。"""
+    if not iso_ts:
+        return 99999
+    try:
+        dt = datetime.datetime.strptime(iso_ts.replace("Z", "+0000"), "%Y-%m-%dT%H:%M:%S%z")
+        now = datetime.datetime.now(datetime.timezone.utc)
+        return max(0, (now - dt).days)
+    except (ValueError, TypeError):
+        return 99999
+
+
+def compute_t_score(meta: dict) -> int:
+    """治理透明度 0-100。spec §5.1。"""
+    if meta.get("archived"):
+        return 0
+
+    score = 0
+    if meta.get("license"):
+        score += 20
+    if meta.get("default_branch") in {"main", "master", "develop"}:
+        score += 15
+    if _age_days(meta.get("pushed_at", "")) <= 90:
+        score += 15
+    if (meta.get("contributors_count") or 0) >= 3:
+        score += 10
+    if _age_days(meta.get("created_at", "")) >= 90:
+        score += 10
+    if meta.get("has_issues"):
+        score += 10
+    if (meta.get("owner") or {}).get("type") == "Organization":
+        score += 5
+    if meta.get("topics"):
+        score += 5
+
+    age = _age_days(meta.get("created_at", ""))
+    stars = meta.get("stargazers_count") or 0
+    contribs = meta.get("contributors_count") or 0
+
+    if age < 14 and stars > 100:
+        score -= 30
+    if contribs == 1 and stars > 100 and age < 60:
+        score -= 20
+    if _age_days(meta.get("pushed_at", "")) > 365:
+        score -= 10
+
+    return max(0, min(100, score))
+
+
+def compute_risk_flags(meta: dict) -> list:
+    """风险标签 list。spec §5.3。"""
+    if meta.get("archived"):
+        return ["🔴 已归档"]
+
+    flags = []
+    age_create = _age_days(meta.get("created_at", ""))
+    age_push = _age_days(meta.get("pushed_at", ""))
+    stars = meta.get("stargazers_count") or 0
+    contribs = meta.get("contributors_count") or 0
+
+    if age_create < 30:
+        flags.append("🟡 仓库太新(< 30 天)")
+    if contribs < 3:
+        flags.append("🟡 单一维护者(< 3 人)")
+    if not meta.get("license"):
+        flags.append("🟡 无 LICENSE")
+    if age_push > 365:
+        flags.append("🟡 长期未维护(> 1 年)")
+    if stars > 100 and age_create < 60 and contribs == 1:
+        flags.append("🟡 star farming 嫌疑")
+    if meta.get("has_issues") is False:
+        flags.append("🟡 没开 issues")
+    if (meta.get("release_count") or 0) == 0 and age_create > 180:
+        flags.append("🟡 无 release")
+
+    return flags
+
+
 # ----------------------------------------------------------------------------- 交互
 def confirm(prompt, assume_yes=False):
     if assume_yes:
