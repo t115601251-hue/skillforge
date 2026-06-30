@@ -290,6 +290,32 @@ class TestCoarseRerank(unittest.TestCase):
         self.assertEqual([t["full_name"] for t in top], ["a/y", "a/z"])
 
 
+class TestFinalRank(unittest.TestCase):
+    def test_no_key_falls_back(self):
+        cands = [
+            {"full_name": "a/x", "U": 10, "T": 10, "risk_flags": [], "readme_excerpt": ""},
+            {"full_name": "a/y", "U": 90, "T": 90, "risk_flags": [], "readme_excerpt": ""},
+            {"full_name": "a/z", "U": 50, "T": 50, "risk_flags": [], "readme_excerpt": ""},
+        ]
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+            top = skillforge.llm_final_rank("q", cands)
+        self.assertEqual(top[0]["full_name"], "a/y")
+        for t in top:
+            self.assertIn("R", t)
+            self.assertIn("recommend_level", t)
+
+    def test_with_key_parses(self):
+        api_payload = {"content": [{"text": '[{"full_name": "a/x", "R": 9, "recommend_level": "强推", "why": "test", "risks": []}]'}]}
+        cands = [{"full_name": "a/x", "U": 1, "T": 1, "risk_flags": [], "readme_excerpt": "..."}]
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "fake"}):
+            with mock.patch("urllib.request.urlopen") as urlopen:
+                urlopen.return_value = _mock_response(api_payload)
+                top = skillforge.llm_final_rank("q", cands)
+        self.assertEqual(top[0]["R"], 9)
+        self.assertEqual(top[0]["recommend_level"], "强推")
+
+
 class TestUScore(unittest.TestCase):
     def test_zero_signals(self):
         score = skillforge.compute_u_score(

@@ -859,6 +859,78 @@ def llm_coarse_rerank(query: str, candidates: list) -> list:
     return _coarse_heuristic(candidates)
 
 
+def _final_heuristic(candidates: list) -> list:
+    """无 LLM 时:按 U+T 降序,造 dummy R/recommend_level/why。"""
+    scored = sorted(candidates, key=lambda c: (c.get("U") or 0) + (c.get("T") or 0), reverse=True)
+    out = []
+    for c in scored[:3]:
+        ut = (c.get("U") or 0) + (c.get("T") or 0)
+        if ut >= 140:
+            level = "推荐"
+        elif ut >= 80:
+            level = "谨慎"
+        else:
+            level = "不推荐"
+        out.append({
+            "full_name": c["full_name"],
+            "R": 0,
+            "recommend_level": level,
+            "why": "(无 ANTHROPIC_API_KEY,按 U+T 启发式排序)",
+            "risks": c.get("risk_flags", []),
+        })
+    return out
+
+
+def llm_final_rank(query: str, candidates: list) -> list:
+    """5 个候选 + README → Top 3 含 R / 级别 / 中文理由 / 风险。无 key 走启发式。"""
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        return _final_heuristic(candidates)
+
+    payload = []
+    for c in candidates:
+        payload.append({
+            "full_name": c["full_name"],
+            "desc": c.get("description", ""),
+            "language": c.get("language", ""),
+            "stars": c.get("stargazers_count", 0),
+            "watchers": c.get("subscribers_count", 0),
+            "forks": c.get("forks_count", 0),
+            "monthly_downloads": c.get("monthly_downloads"),
+            "release_count": c.get("release_count", 0),
+            "close_rate": c.get("close_rate"),
+            "U": c.get("U"), "T": c.get("T"),
+            "risk_flags": c.get("risk_flags", []),
+            "readme_excerpt": (c.get("readme_excerpt") or "")[:4000],
+        })
+    prompt = (
+        f'用户中文需求: "{query}"\n\n'
+        "下面是 5 个候选的完整数据,含 README 摘录。请综合相关性、真实使用证据、治理透明度,选出 Top 3。\n\n"
+        f"候选 (JSON):\n{json.dumps(payload, ensure_ascii=False)}\n\n"
+        "对每个候选,基于 README 判断它是否真能解决用户需求:\n"
+        "- R (0-10): 相关性。README 里有没有明确对应用户场景的功能/示例?\n"
+        '- recommend_level: "强推" | "推荐" | "谨慎" | "不推荐"\n'
+        "  推荐级别参考:\n"
+        "  - 强推: R ≥ 8, U ≥ 70, T ≥ 70, 无 🔴 flag\n"
+        "  - 推荐: R ≥ 7, U ≥ 30, T ≥ 50, ≤ 2 个 🟡 flag\n"
+        "  - 谨慎: R ≥ 6, 但 U < 30 或 T < 50 或多个 🟡 flag\n"
+        "  - 不推荐: R < 6, 或有 🔴 archived\n"
+        '- why: 2 句中文推荐理由,说清"这库的核心能力是什么、为什么命中用户需求"\n'
+        "- risks: 中文风险点 array,基于 risk_flags + README 看到的隐患\n\n"
+        "按推荐度从高到低,只输出 JSON,共 3 个:\n"
+        '[{"full_name": "...", "R": 9, "recommend_level": "强推", "why": "...", "risks": [...]}, ...]'
+    )
+    text = _llm_call(prompt, max_tokens=1500)
+    if not text:
+        return _final_heuristic(candidates)
+    try:
+        arr = json.loads(_strip_code_fence(text))
+        if isinstance(arr, list) and arr:
+            return arr[:3]
+    except Exception:
+        pass
+    return _final_heuristic(candidates)
+
+
 def fetch_downloads(ecosystem: str, name: str):
     """月下载量;失败/未知 ecosystem 返回 None。免认证公开端点。"""
     if not name:
