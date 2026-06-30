@@ -1224,7 +1224,105 @@ def cmd_trust(args):
         print(f"已写入 {Path(TRUSTED_FILE).expanduser()}({len(new_set)} 条)")
 
 
-def cmd_find(args):
+def _info_to_chosen(info: dict) -> dict:
+    """把 /repos 响应 / fetch_metadata 输出格式化成 _install_chosen 期待的 chosen dict。"""
+    return {
+        "full_name": info["full_name"],
+        "description": info.get("description") or "",
+        "stars": info.get("stargazers_count", 0),
+        "updated": (info.get("pushed_at") or "")[:10],
+        "language": info.get("language") or "",
+        "clone_url": info["clone_url"],
+        "html_url": info["html_url"],
+    }
+
+
+def _install_chosen(args, chosen: dict, token):
+    """选定一个仓库后的统一安装段:star → clone → 安装命令 → adoption → gen SKILL.md → register。
+    供新老 cmd_find 共用。
+    """
+    print(f"\n选定: {chosen['full_name']}  {chosen['stars']}★")
+    print(f"  {chosen['html_url']}")
+
+    # star + 收藏
+    if not args.no_star:
+        if token:
+            if confirm(f"给 {chosen['full_name']} 点 star?", args.yes):
+                try:
+                    ok = star_repo(chosen["full_name"], token)
+                    print("  ⭐ 已 star" if ok else "  star 返回非预期状态")
+                except GHError as e:
+                    print(f"  ⚠️ star 失败:{e}")
+                except Exception as e:
+                    print(f"  ⚠️ star 失败:{e}")
+        else:
+            print("  (未设置 GITHUB_TOKEN,跳过 star;设置后即可自动点赞收藏)")
+
+    # clone
+    name = re.sub(r"[^a-z0-9-]+", "-", chosen["full_name"].split("/")[-1].lower()).strip("-")
+    home = Path(CANONICAL_HOME).expanduser()
+    skill_dir = home / name
+    repo_dir = skill_dir / "repo"
+    if skill_dir.exists():
+        print(f"  技能目录已存在: {skill_dir}")
+    else:
+        if confirm(f"clone {chosen['full_name']} 到 {repo_dir}?", args.yes):
+            try:
+                clone_repo(chosen["clone_url"], repo_dir)
+                print(f"  📥 已 clone 到 {repo_dir}")
+            except subprocess.CalledProcessError as e:
+                print(f"  clone 失败: {e.stderr}")
+                return
+        else:
+            print("已取消。")
+            return
+
+    # 检测安装命令(白名单视作 --install)
+    install_cmds = detect_install_cmds(repo_dir)
+    if install_cmds:
+        print(f"  检测到安装命令: {install_cmds}")
+        trusted_hit = is_trusted(chosen["full_name"])
+        allow = args.install or trusted_hit
+        reason = "--install" if args.install else ("trusted.txt" if trusted_hit else None)
+        if allow and confirm(f"现在执行安装?(来源:{reason},会运行仓库代码)", args.yes):
+            for c in install_cmds:
+                print(f"  $ {c}")
+                subprocess.run(c, shell=True, cwd=repo_dir)
+        elif allow:
+            print("  (已取消安装)")
+        else:
+            print("  (默认不自动安装。把 owner 加入 ~/.skillforge/trusted.txt 或加 --install 即可自动)")
+    else:
+        print("  未检测到标准安装方式,仅保留源码。")
+
+    # Adoption
+    adopted = False
+    found = find_handcrafted_skill_md(name, skill_dir)
+    if found:
+        existing_md, length, source_dir = found
+        print(f"  📑 发现已有手写 SKILL.md:{existing_md} (description {length} 字符)")
+        if confirm("  采用它为权威版,跳过新生成?", args.yes):
+            adopt_handcrafted_skill_md(source_dir, skill_dir)
+            print(f"  ✅ 已采用原作为权威版,旧目录已 .bak 备份")
+            adopted = True
+
+    # 生成 SKILL.md(如果没有 adopt)
+    if not adopted:
+        readme = fetch_readme(chosen["full_name"], token)
+        md = gen_skill_md(chosen, readme, install_cmds)
+        (skill_dir / "SKILL.md").write_text(md, encoding="utf-8")
+        print(f"  📝 已生成 {skill_dir / 'SKILL.md'}")
+
+    # 注册到各 agent 目录
+    if not args.no_register:
+        for target, how in register_skill(skill_dir, link=not args.copy):
+            print(f"  🔗 注册 {target}  ({how})")
+
+    print(f"\n✅ 完成。下次再问类似需求,会直接命中本地技能 `{name}`。")
+
+
+def cmd_find_simple(args):
+    """老路径:单次 keyword 搜 + stars 排序 + 用户挑序号。--simple 触发。"""
     query = " ".join(args.query)
     token = os.environ.get("GITHUB_TOKEN")
 
@@ -1245,15 +1343,7 @@ def cmd_find(args):
         except GHError as e:
             print(f"❌ 取仓库元数据失败:{e}", file=sys.stderr)
             return
-        chosen = {
-            "full_name": info["full_name"],
-            "description": info.get("description") or "",
-            "stars": info.get("stargazers_count", 0),
-            "updated": (info.get("pushed_at") or "")[:10],
-            "language": info.get("language") or "",
-            "clone_url": info["clone_url"],
-            "html_url": info["html_url"],
-        }
+        chosen = _info_to_chosen(info)
     else:
         print(f'🔎 本地没有,去 GitHub 搜索「{query}」…')
         cands = github_search(query, token, top=args.top)
@@ -1275,84 +1365,149 @@ def cmd_find(args):
                 return
         chosen = cands[idx]
 
-    print(f"\n选定: {chosen['full_name']}  {chosen['stars']}★")
-    print(f"  {chosen['html_url']}")
+    return _install_chosen(args, chosen, token)
 
-    # 3) star + 收藏(改动账号,先确认)
-    if not args.no_star:
-        if token:
-            if confirm(f"给 {chosen['full_name']} 点 star?", args.yes):
-                try:
-                    ok = star_repo(chosen["full_name"], token)
-                    print("  ⭐ 已 star" if ok else "  star 返回非预期状态")
-                except GHError as e:
-                    print(f"  ⚠️ star 失败:{e}")
-                except Exception as e:
-                    print(f"  ⚠️ star 失败:{e}")
-        else:
-            print("  (未设置 GITHUB_TOKEN,跳过 star;设置后即可自动点赞收藏)")
 
-    # 4) clone
-    name = re.sub(r"[^a-z0-9-]+", "-", chosen["full_name"].split("/")[-1].lower()).strip("-")
-    home = Path(CANONICAL_HOME).expanduser()
-    skill_dir = home / name
-    repo_dir = skill_dir / "repo"
-    if skill_dir.exists():
-        print(f"  技能目录已存在: {skill_dir}")
+def _guess_install(language: str):
+    """根据语言粗推安装命令(真 clone 后还会精确检测)。"""
+    lang = (language or "").lower()
+    if lang == "python":
+        return ["pip install -e ."]
+    if lang in {"javascript", "typescript"}:
+        return ["npm install"]
+    if lang == "rust":
+        return ["cargo build --release"]
+    return []
+
+
+def cmd_find(args):
+    """新流水线 cmd_find:LLM 改写 → 多搜 → 体检 → 粗排 → 深读 → 终排 → Top 3。
+    --simple 走 cmd_find_simple(老路径)。
+    """
+    if args.simple:
+        return cmd_find_simple(args)
+
+    query = " ".join(args.query)
+    token = os.environ.get("GITHUB_TOKEN")
+
+    # 0) 前置闸门(同老逻辑)
+    skills, _ = scan_local()
+    matches = match_local(query, skills)
+    if matches and not args.force_new:
+        print(f'✅ 本地已有能满足「{query}」的技能,无需重复安装:\n')
+        for s, score in matches[:3]:
+            print(f"  ● {s.name}  (匹配度 {score:.2f}) — {s.description[:60]}")
+        print("\n如仍想另装新的,加 --force-new。")
+        return
+
+    # --repo 直通
+    if args.repo:
+        try:
+            _, info = gh_request(f"/repos/{args.repo}", token)
+        except GHError as e:
+            print(f"❌ 取仓库元数据失败:{e}", file=sys.stderr)
+            return
+        return _install_chosen(args, _info_to_chosen(info), token)
+
+    # 1) LLM 改写
+    print(f'🔎 「{query}」 改写中…')
+    queries = llm_rewrite_query(query)
+    print(f"   改写得到 {len(queries)} 个 query:{queries}")
+
+    # 2) 多搜 + 合并去重
+    seen, candidates = set(), []
+    for q in queries:
+        for c in github_search(q, token, top=max(args.top * 2, 6)):
+            if c["full_name"] in seen:
+                continue
+            seen.add(c["full_name"])
+            candidates.append(c)
+    if not candidates:
+        print("❌ 没搜到任何候选,换个描述试试。")
+        return
+    print(f"   合并去重得 {len(candidates)} 个候选")
+
+    # 3) 元数据体检
+    print("   体检中…")
+    enriched = []
+    for c in candidates:
+        try:
+            enriched.append(fetch_metadata(c["full_name"], token))
+        except GHError as e:
+            print(f"   skip {c['full_name']}: {e}", file=sys.stderr)
+    if not enriched:
+        print("❌ 体检后无可用候选。")
+        return
+
+    # 4) 临时 U 分(没有 downloads/close_rate)
+    for m in enriched:
+        m["U"] = compute_u_score(
+            stars=m.get("stargazers_count", 0),
+            watchers=m.get("subscribers_count", 0),
+            forks=m.get("forks_count", 0),
+            downloads=None, release_count=m.get("release_count", 0),
+            close_rate=None,
+        )
+
+    # 5) LLM 粗排 → Top 5
+    print("   LLM 粗排…")
+    top5_refs = llm_coarse_rerank(query, enriched)
+    top5_names = [r["full_name"] for r in top5_refs]
+    top5 = [m for m in enriched if m["full_name"] in top5_names]
+
+    # 6) 深读 Top 5:README + close_rate + 包下载量(可选跳过)
+    if not args.no_readme:
+        print("   深读 Top 5…")
+        for m in top5:
+            m["readme_excerpt"] = fetch_readme(m["full_name"], token)
+            m["close_rate"] = fetch_close_rate(m["full_name"], token)
+            pkg = guess_package_name(m["full_name"], m.get("default_branch", "main"), m.get("language", ""))
+            m["monthly_downloads"] = fetch_downloads(pkg["ecosystem"], pkg["name"]) if pkg else None
+            # 重算 U
+            m["U"] = compute_u_score(
+                stars=m.get("stargazers_count", 0),
+                watchers=m.get("subscribers_count", 0),
+                forks=m.get("forks_count", 0),
+                downloads=m["monthly_downloads"],
+                release_count=m.get("release_count", 0),
+                close_rate=m["close_rate"],
+            )
+            m["install_cmds"] = _guess_install(m.get("language", ""))
     else:
-        if confirm(f"clone {chosen['full_name']} 到 {repo_dir}?", args.yes):
-            try:
-                clone_repo(chosen["clone_url"], repo_dir)
-                print(f"  📥 已 clone 到 {repo_dir}")
-            except subprocess.CalledProcessError as e:
-                print(f"  clone 失败: {e.stderr}")
-                return
-        else:
+        for m in top5:
+            m["readme_excerpt"] = ""
+            m["close_rate"] = None
+            m["monthly_downloads"] = None
+            m["install_cmds"] = _guess_install(m.get("language", ""))
+
+    # 7) LLM 终排 → Top 3
+    print("   LLM 终排…")
+    ranked = llm_final_rank(query, top5)
+
+    # 8) 渲染
+    trusted = load_trusted()
+    meta_by_name = {m["full_name"]: m for m in top5}
+    print("\n" + render_top3(query, ranked, meta_by_name, trusted))
+
+    # 9) 让用户选
+    if not ranked:
+        print("❌ 终排无结果。")
+        return
+    if args.yes:
+        idx = 0
+        print("[自动选 0]")
+    else:
+        try:
+            idx = int(input("选哪个? 输序号: ").strip())
+        except (ValueError, EOFError):
             print("已取消。")
             return
+        if idx < 0 or idx >= len(ranked):
+            print(f"无效序号 {idx}。已取消。")
+            return
 
-    # 5) 检测安装命令(默认不自动执行;若 owner 在 trusted.txt 里,视作 --install)
-    install_cmds = detect_install_cmds(repo_dir)
-    if install_cmds:
-        print(f"  检测到安装命令: {install_cmds}")
-        trusted_hit = is_trusted(chosen["full_name"])
-        allow = args.install or trusted_hit
-        reason = "--install" if args.install else ("trusted.txt" if trusted_hit else None)
-        if allow and confirm(f"现在执行安装?(来源:{reason},会运行仓库代码)", args.yes):
-            for c in install_cmds:
-                print(f"  $ {c}")
-                subprocess.run(c, shell=True, cwd=repo_dir)
-        elif allow:
-            print("  (已取消安装)")
-        else:
-            print("  (默认不自动安装。把 owner 加入 ~/.skillforge/trusted.txt 或加 --install 即可自动)")
-    else:
-        print("  未检测到标准安装方式,仅保留源码。")
-
-    # 5.5) Adoption:发现已有手写的高质量 SKILL.md 就采用,而不是用模板/LLM 重新生成
-    adopted = False
-    found = find_handcrafted_skill_md(name, skill_dir)
-    if found:
-        existing_md, length, source_dir = found
-        print(f"  📑 发现已有手写 SKILL.md:{existing_md} (description {length} 字符)")
-        if confirm("  采用它为权威版,跳过新生成?", args.yes):
-            adopt_handcrafted_skill_md(source_dir, skill_dir)
-            print(f"  ✅ 已采用原作为权威版,旧目录已 .bak 备份")
-            adopted = True
-
-    # 6) 生成 SKILL.md(如果没有 adopt)
-    if not adopted:
-        readme = fetch_readme(chosen["full_name"], token)
-        md = gen_skill_md(chosen, readme, install_cmds)
-        (skill_dir / "SKILL.md").write_text(md, encoding="utf-8")
-        print(f"  📝 已生成 {skill_dir / 'SKILL.md'}")
-
-    # 7) 注册到各 agent 目录
-    if not args.no_register:
-        for target, how in register_skill(skill_dir, link=not args.copy):
-            print(f"  🔗 注册 {target}  ({how})")
-
-    print(f"\n✅ 完成。下次再问类似需求,会直接命中本地技能 `{name}`。")
+    chosen_name = ranked[idx]["full_name"]
+    return _install_chosen(args, _info_to_chosen(meta_by_name[chosen_name]), token)
 
 
 # ----------------------------------------------------------------------------- 入口
@@ -1368,16 +1523,18 @@ def build_parser():
     pw.add_argument("query", nargs="+")
     pw.set_defaults(func=cmd_which)
 
-    pf = sub.add_parser("find", help="本地没有就去 GitHub 找并安装")
+    pf = sub.add_parser("find", help="本地没有就去 GitHub 找并安装(LLM 增强,见 specs)")
     pf.add_argument("query", nargs="+")
     pf.add_argument("--repo", help="跳过搜索,直接指定 owner/repo")
-    pf.add_argument("--top", type=int, default=5, help="搜索候选数")
+    pf.add_argument("--top", type=int, default=3, help="最终展示几个候选(默认 3;多搜阶段按 top*2 拉)")
     pf.add_argument("--yes", action="store_true", help="非交互:自动确认+选第一个")
     pf.add_argument("--force-new", action="store_true", help="本地已有也强制装新的")
     pf.add_argument("--no-star", action="store_true")
     pf.add_argument("--install", action="store_true", help="允许执行安装命令")
     pf.add_argument("--no-register", action="store_true")
     pf.add_argument("--copy", action="store_true", help="注册用复制而非软链")
+    pf.add_argument("--simple", action="store_true", help="跳过 LLM 流水线,走老 keyword 搜索路径")
+    pf.add_argument("--no-readme", action="store_true", help="跳过 README 深读 + close-rate + 下载量")
     pf.set_defaults(func=cmd_find)
 
     pt = sub.add_parser("trust", help="管理可信 owner 白名单(命中则自动允许 --install)")
