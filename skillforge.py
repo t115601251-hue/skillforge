@@ -757,6 +757,34 @@ def guess_package_name(full_name: str, default_branch: str, language: str):
     return None
 
 
+def fetch_downloads(ecosystem: str, name: str):
+    """月下载量;失败/未知 ecosystem 返回 None。免认证公开端点。"""
+    if not name:
+        return None
+    try:
+        if ecosystem == "pypi":
+            url = f"https://pypistats.org/api/packages/{name}/recent"
+            req = urllib.request.Request(url, headers={"User-Agent": "skillforge", "Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                data = json.loads(r.read())
+            return data.get("data", {}).get("last_month")
+        if ecosystem == "npm":
+            url = f"https://api.npmjs.org/downloads/point/last-month/{name}"
+            with urllib.request.urlopen(url, timeout=15) as r:
+                data = json.loads(r.read())
+            return data.get("downloads")
+        if ecosystem == "cargo":
+            url = f"https://crates.io/api/v1/crates/{name}/downloads"
+            req = urllib.request.Request(url, headers={"User-Agent": "skillforge"})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                data = json.loads(r.read())
+            entries = data.get("version_downloads", [])[:30]
+            return sum(int(e.get("downloads", 0)) for e in entries)
+    except Exception:
+        return None
+    return None
+
+
 def fetch_close_rate(full_name: str, token=None):
     """返回 0-1 之间的 issue 闭合率,无历史/失败 → None。"""
     def _count(state):

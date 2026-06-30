@@ -204,6 +204,40 @@ class TestGuessPackageName(unittest.TestCase):
         self.assertEqual(r, {"ecosystem": "pypi", "name": "bar-baz"})
 
 
+class TestFetchDownloads(unittest.TestCase):
+    def test_pypi(self):
+        payload = {"data": {"last_day": 80000, "last_week": 560000, "last_month": 2400000}}
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            urlopen.return_value = _mock_response(payload)
+            n = skillforge.fetch_downloads("pypi", "rembg")
+        self.assertEqual(n, 2400000)
+
+    def test_npm(self):
+        payload = {"downloads": 150000, "package": "left-pad"}
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            urlopen.return_value = _mock_response(payload)
+            n = skillforge.fetch_downloads("npm", "left-pad")
+        self.assertEqual(n, 150000)
+
+    def test_cargo_sums_last_30(self):
+        payload = {"version_downloads": [
+            {"date": "2026-06-29", "downloads": 100, "version": 1},
+            {"date": "2026-06-28", "downloads": 200, "version": 1},
+        ]}
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            urlopen.return_value = _mock_response(payload)
+            n = skillforge.fetch_downloads("cargo", "ripgrep")
+        self.assertEqual(n, 300)
+
+    def test_unknown_eco_returns_none(self):
+        self.assertIsNone(skillforge.fetch_downloads("conda", "anything"))
+
+    def test_404_returns_none(self):
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=urllib.error.HTTPError("u", 404, "x", {}, None)):
+            self.assertIsNone(skillforge.fetch_downloads("pypi", "this-pkg-doesnt-exist-9999"))
+
+
 class TestUScore(unittest.TestCase):
     def test_zero_signals(self):
         score = skillforge.compute_u_score(
