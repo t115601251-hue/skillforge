@@ -78,13 +78,32 @@ skillforge consolidate [--dry-run]    # 把同名物理副本合并到 SKILLFORG
 | 参数 | 作用 |
 |---|---|
 | `--repo owner/name` | 跳过搜索,直接指定仓库 |
-| `--top N` | 搜索候选个数(默认 5) |
+| `--top N` | 输出几个候选(默认 3;多搜阶段按 top*2 拉) |
 | `--yes` | 非交互:自动确认 + 选第一个候选 |
 | `--force-new` | 本地已有也强制装新的 |
 | `--no-star` | 不点 star |
 | `--install` | 允许执行检测到的安装命令(默认**不**自动执行) |
 | `--no-register` | 不注册到 agent 目录 |
 | `--copy` | 注册用复制而非软链 |
+| `--simple` | 跳过 LLM 流水线,走老 keyword 搜索路径(快,$0,质量低) |
+| `--no-readme` | 跳过 README 深读 + close-rate + 下载量(中速) |
+
+### LLM 增强 find 流水线(默认)
+
+当 `ANTHROPIC_API_KEY` + `GITHUB_TOKEN` 都设了时,`find` 走 9 步流水线:
+
+1. LLM 把中文需求改写成 3 个英文 query(功能/工具/技术栈三角度)
+2. 三个 query 各搜 GitHub,合并去重得 10-15 候选
+3. 对每个候选拉 `/repos/{x}` 元数据,算治理分 **T (0-100)** + 风险标签
+4. LLM 粗排,挑出最相关的 5 个继续深读
+5-6. 对 Top 5:fetch README + issue 闭合率 + 包月下载量(PyPI/npm/Crates)
+7. 算使用度 **U (0-100)**,融合 stars/watchers/forks/下载量/release/闭合率
+8. LLM 终排出 Top 3,带相关性 **R (0-10)** + 推荐级别 + 中文理由 + 风险列表
+9. 渲染 Top 3 让你选
+
+成本 ~$0.02 + 8-12s / find。详见 [specs/2026-06-30-skill-search-quality.md](specs/2026-06-30-skill-search-quality.md) 和 [plans/2026-06-30-skill-search-quality.md](plans/2026-06-30-skill-search-quality.md)。
+
+**降级**:无 `ANTHROPIC_API_KEY` 时跳过 LLM,改用 `0.6*U + 0.4*T` 启发式排序;R 显示为 `--`。无 `GITHUB_TOKEN` 时匿名(60/h 通常不够),建议设一个。
 
 ### Adoption(自动发现已有手写 SKILL.md)
 
@@ -148,7 +167,8 @@ skillforge consolidate --yes       # 执行:挑权威版(已在 SKILLFORGE_HOME 
 技能会让 agent 运行指令和代码,社区已出现过供应链攻击。本工具内置这些保护:
 
 - **star、装包默认先确认**,不闷头执行;
-- **安装命令默认不自动跑**,先把检测到的命令打印给你看,确认安全后才用 `--install`;
+- **安装命令默认不自动跑**,先把检测到的命令打印给你看,确认安全后才用 `--install`(或加 owner 到 `trusted.txt` 白名单);
+- **三维评分透明化**:每个推荐候选都附 **R** 相关性(LLM 读 README 打 0-10)、**U** 真实使用证据(stars/watchers/forks/月下载量/release/issue 闭合率融合 0-100)、**T** 治理透明度(LICENSE/活跃度/单一维护者/archived/star farming 等 0-100)三维分 + 风险标签;archived 必扣 T 到 0,star farming 嫌疑、新仓库、单一维护者、无 LICENSE 都用 🟡 标记;
 - 生成的 SKILL.md 里附带"使用前请审阅仓库代码与依赖"提示;
 - token 只从环境变量读,**绝不硬编码**。
 
