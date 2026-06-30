@@ -1310,10 +1310,27 @@ def _install_chosen(args, chosen: dict, token):
 
     # 生成 SKILL.md(如果没有 adopt)
     if not adopted:
-        readme = fetch_readme(chosen["full_name"], token)
-        md = gen_skill_md(chosen, readme, install_cmds)
-        (skill_dir / "SKILL.md").write_text(md, encoding="utf-8")
-        print(f"  📝 已生成 {skill_dir / 'SKILL.md'}")
+        # 保护:如果 SKILL.md 已存在且 description ≥ 80 字符,默认不覆盖
+        # (可能是手写版 / 之前用 LLM 生成的高质量版,不该被本次模板兜底冲掉)
+        existing_md = skill_dir / "SKILL.md"
+        if existing_md.exists():
+            try:
+                ex_meta = parse_frontmatter(existing_md)
+            except Exception:
+                ex_meta = None
+            ex_desc_len = len((ex_meta or {}).get("description", ""))
+            if ex_desc_len >= 80:
+                print(f"  📑 SKILL.md 已存在 (description {ex_desc_len} 字符),保留;rm 后重跑可重新生成")
+            else:
+                readme = fetch_readme(chosen["full_name"], token)
+                md = gen_skill_md(chosen, readme, install_cmds)
+                existing_md.write_text(md, encoding="utf-8")
+                print(f"  📝 已生成 {existing_md}")
+        else:
+            readme = fetch_readme(chosen["full_name"], token)
+            md = gen_skill_md(chosen, readme, install_cmds)
+            existing_md.write_text(md, encoding="utf-8")
+            print(f"  📝 已生成 {existing_md}")
 
     # 注册到各 agent 目录
     if not args.no_register:
