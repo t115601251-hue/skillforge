@@ -873,7 +873,7 @@ def _final_heuristic(candidates: list) -> list:
             level = "不推荐"
         out.append({
             "full_name": c["full_name"],
-            "R": 0,
+            "R": None,  # 启发式算不了相关性
             "recommend_level": level,
             "why": "(无 ANTHROPIC_API_KEY,按 U+T 启发式排序)",
             "risks": c.get("risk_flags", []),
@@ -957,7 +957,9 @@ def render_top3(query: str, ranked: list, meta_by_name: dict, trusted_set: set) 
         rate_str = (f"{int((m.get('close_rate') or 0) * 100)}%"
                     if m.get("close_rate") is not None else "无历史")
         lines.append(f"  [{i}] {_stars(item.get('recommend_level',''))}  {fn}  ({m.get('language','')})")
-        lines.append(f"      R 相关 {item.get('R',0)}/10  ·  U 使用 {m.get('U',0)}/100  ·  T 治理 {m.get('T',0)}/100")
+        r = item.get("R")
+        r_str = f"{r}/10" if r is not None else "--"
+        lines.append(f"      R 相关 {r_str}  ·  U 使用 {m.get('U',0)}/100  ·  T 治理 {m.get('T',0)}/100")
         lines.append(
             f"      ★ {_fmt_int(m.get('stargazers_count'))}  "
             f"👁 {_fmt_int(m.get('subscribers_count'))}  "
