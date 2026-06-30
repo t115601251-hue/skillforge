@@ -1808,6 +1808,209 @@ def cmd_self_install(args):
     print(f"   注意:如果 /skill查找 等中文 slash 命令在某 agent 上不识别,可手动 mv 为 ASCII 名 (skill-find.md 等)。")
 
 
+# ----------------------------------------------------------------------------- v4: agent-as-LLM API
+# 5 个"无脑"子命令,只做数据采集 / 渲染 / 应用,所有 LLM 推理由调用 agent 完成。
+# 流水线: agent 改写 query → find-data → agent 粗排 → deep-data → agent 终排 → render
+# 修改:  modify-source → agent 写 changes → modify-apply
+
+
+def cmd_find_data(args):
+    """find-data <q1> [q2] [q3]: 多搜+元数据+T/U → JSON 到 stdout (进度去 stderr)。"""
+    token = os.environ.get("GITHUB_TOKEN")
+    queries = args.queries
+    print(f"🔎 {len(queries)} 个 query 三角度搜", file=sys.stderr)
+    seen, candidates = set(), []
+    for q in queries:
+        try:
+            results = github_search(q, token, top=max(args.top * 2, 6))
+        except GHError as e:
+            print(f"   query '{q}' 搜索失败: {e}", file=sys.stderr)
+            continue
+        for c in results:
+            if c["full_name"] in seen:
+                continue
+            seen.add(c["full_name"])
+            candidates.append(c)
+    print(f"   合并去重得 {len(candidates)} 候选", file=sys.stderr)
+    if not candidates:
+        print("[]")
+        return
+
+    print(f"   元数据体检中...", file=sys.stderr)
+    out = []
+    for c in candidates:
+        try:
+            m = fetch_metadata(c["full_name"], token)
+        except GHError as e:
+            print(f"   skip {c['full_name']}: {e}", file=sys.stderr)
+            continue
+        m["U"] = compute_u_score(
+            stars=m.get("stargazers_count", 0),
+            watchers=m.get("subscribers_count", 0),
+            forks=m.get("forks_count", 0),
+            downloads=None,
+            release_count=m.get("release_count", 0),
+            close_rate=None,
+        )
+        out.append({
+            "full_name": m["full_name"],
+            "description": m.get("description", "") or "",
+            "language": m.get("language", "") or "",
+            "stargazers_count": m.get("stargazers_count", 0),
+            "subscribers_count": m.get("subscribers_count", 0),
+            "forks_count": m.get("forks_count", 0),
+            "default_branch": m.get("default_branch", "main"),
+            "release_count": m.get("release_count", 0),
+            "contributors_count": m.get("contributors_count", 0),
+            "U": m["U"], "T": m["T"],
+            "risk_flags": m.get("risk_flags", []),
+            "clone_url": m.get("clone_url", ""),
+            "html_url": m.get("html_url", ""),
+        })
+    print(json.dumps(out, ensure_ascii=False, indent=2))
+
+
+def cmd_deep_data(args):
+    """deep-data <name...>: 抓 README + Scorecard + OSV + 下载量 + close_rate → JSON to stdout。"""
+    token = os.environ.get("GITHUB_TOKEN")
+    out = []
+    for fn in args.names:
+        print(f"🔍 deep {fn}", file=sys.stderr)
+        try:
+            m = fetch_metadata(fn, token)
+        except GHError as e:
+            print(f"   skip {fn}: {e}", file=sys.stderr)
+            continue
+        m["readme_excerpt"] = fetch_readme(fn, token)[:4000]
+        m["close_rate"] = fetch_close_rate(fn, token)
+        pkg = guess_package_name(fn, m.get("default_branch", "main"), m.get("language", ""))
+        m["monthly_downloads"] = fetch_downloads(pkg["ecosystem"], pkg["name"]) if pkg else None
+        m["scorecard"] = fetch_scorecard(fn)
+        m["osv_vulns"] = fetch_osv_vulns(pkg["ecosystem"], pkg["name"]) if pkg else []
+        m["T"] = compute_t_score(m, scorecard=m["scorecard"], osv_vulns=m["osv_vulns"])
+        m["risk_flags"] = compute_risk_flags(m, scorecard=m["scorecard"], osv_vulns=m["osv_vulns"])
+        m["U"] = compute_u_score(
+            stars=m.get("stargazers_count", 0),
+            watchers=m.get("subscribers_count", 0),
+            forks=m.get("forks_count", 0),
+            downloads=m["monthly_downloads"],
+            release_count=m.get("release_count", 0),
+            close_rate=m["close_rate"],
+        )
+        m["install_cmds"] = _guess_install(m.get("language", ""))
+        sc_failed = []
+        if m["scorecard"]:
+            sc_failed = [c.get("name") for c in (m["scorecard"].get("checks") or [])
+                         if (c.get("score") or 0) < 5][:8]
+        out.append({
+            "full_name": m["full_name"],
+            "description": m.get("description", "") or "",
+            "language": m.get("language", "") or "",
+            "stargazers_count": m.get("stargazers_count", 0),
+            "subscribers_count": m.get("subscribers_count", 0),
+            "forks_count": m.get("forks_count", 0),
+            "default_branch": m.get("default_branch", "main"),
+            "release_count": m.get("release_count", 0),
+            "close_rate": m["close_rate"],
+            "monthly_downloads": m["monthly_downloads"],
+            "scorecard_score": m["scorecard"].get("score") if m["scorecard"] else None,
+            "scorecard_failed_checks": sc_failed,
+            "osv_vulns": m["osv_vulns"],
+            "U": m["U"], "T": m["T"],
+            "risk_flags": m["risk_flags"],
+            "install_cmds": m["install_cmds"],
+            "readme_excerpt": m["readme_excerpt"],
+            "clone_url": m.get("clone_url", ""),
+            "html_url": m.get("html_url", ""),
+        })
+    print(json.dumps(out, ensure_ascii=False, indent=2))
+
+
+def cmd_render(args):
+    """render --file <ranking.json>: 读 agent 的 ranking,渲染 Top 3。
+    格式: {query: str, ranked: [...], meta_by_name: {full_name: {full meta dict}}}
+    """
+    path = Path(args.file)
+    if not path.exists():
+        print(f"❌ 文件不存在: {path}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"❌ JSON 解析失败: {e}", file=sys.stderr)
+        sys.exit(1)
+    query = data.get("query", "(未传)")
+    ranked = data.get("ranked", [])
+    meta_by_name = data.get("meta_by_name", {})
+    trusted = load_trusted()
+    print(render_top3(query, ranked, meta_by_name, trusted))
+
+
+def cmd_modify_source(args):
+    """modify-source <name|编号>: dump skill 所有源文件 → JSON to stdout。"""
+    name = resolve_skill(args.target)
+    if not name:
+        print(f"❌ 找不到 '{args.target}'", file=sys.stderr)
+        sys.exit(1)
+    skill_dir = Path(CANONICAL_HOME).expanduser() / name
+    if not skill_dir.exists():
+        print(f"❌ skill 不存在: {skill_dir}", file=sys.stderr)
+        sys.exit(1)
+    print(f"📂 读 {skill_dir} 源码", file=sys.stderr)
+    files = _collect_skill_files(skill_dir)
+    print(f"   {len(files)} 文件, {sum(len(c) for c in files.values())} 字符", file=sys.stderr)
+    print(json.dumps({
+        "name": name,
+        "skill_dir": str(skill_dir),
+        "files": files,
+    }, ensure_ascii=False, indent=2))
+
+
+def cmd_modify_apply(args):
+    """modify-apply <name|编号> --file <changes.json>: 应用 agent 出的 changes。
+    changes 格式: [{path, action: modify|create|delete, new_content}, ...]
+    """
+    name = resolve_skill(args.target)
+    if not name:
+        print(f"❌ 找不到 '{args.target}'", file=sys.stderr)
+        sys.exit(1)
+    skill_dir = Path(CANONICAL_HOME).expanduser() / name
+    if not skill_dir.exists():
+        print(f"❌ skill 不存在: {skill_dir}", file=sys.stderr)
+        sys.exit(1)
+    cfile = Path(args.file)
+    if not cfile.exists():
+        print(f"❌ changes 文件不存在: {cfile}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        changes = json.loads(cfile.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"❌ changes JSON 解析失败: {e}", file=sys.stderr)
+        sys.exit(1)
+    if not isinstance(changes, list):
+        print("❌ changes 必须是 JSON array", file=sys.stderr)
+        sys.exit(1)
+
+    request = args.summary or "(via modify-apply, agent-driven)"
+
+    print(f"\n=== 提议的修改 ({len(changes)} 文件) ===")
+    diff_text = _diff_changes(changes, skill_dir)
+    SHOW = 6000
+    print(diff_text[:SHOW])
+    if len(diff_text) > SHOW:
+        print(f"\n[diff 太长,只显示前 {SHOW} 字符]")
+
+    if not confirm(f"\n应用以上修改?(改前自动快照到 versions/{name}/previous/)", args.yes):
+        print("已取消。")
+        return
+
+    print(f"💾 快照 → versions/{name}/previous/")
+    save_previous(name, skill_dir)
+    _apply_changes(changes, skill_dir)
+    _update_customization_meta(name, request)
+    print(f"\n✅ 改完。回滚: skillforge rollback {name}")
+
+
 def cmd_install(args):
     """/skill安装:把 target 装下来。target 可以是:
     - "owner/repo" → 直接 find --repo --yes
@@ -2487,6 +2690,31 @@ def build_parser():
 
     ph = sub.add_parser("help", help="列所有 skill 命令的用法")
     ph.set_defaults(func=cmd_help)
+
+    # v4: agent-as-LLM 工具命令(无 LLM 调用,纯数据 / 渲染 / 应用)
+    pfd = sub.add_parser("find-data", help="(无 LLM)多搜+元数据+T/U → JSON")
+    pfd.add_argument("queries", nargs="+", help="1-3 个英文 query")
+    pfd.add_argument("--top", type=int, default=3, help="每个 query 拉的候选数(总数会去重)")
+    pfd.set_defaults(func=cmd_find_data)
+
+    pdd = sub.add_parser("deep-data", help="(无 LLM)抓 README+Scorecard+OSV+下载量 → JSON")
+    pdd.add_argument("names", nargs="+", help="一个或多个 owner/repo")
+    pdd.set_defaults(func=cmd_deep_data)
+
+    prn = sub.add_parser("render", help="(无 LLM)读 agent 的 ranking.json → 渲染 Top 3")
+    prn.add_argument("--file", required=True, help="JSON 文件路径")
+    prn.set_defaults(func=cmd_render)
+
+    pms = sub.add_parser("modify-source", help="(无 LLM)dump skill 所有源文件 → JSON")
+    pms.add_argument("target", help="name 或编号")
+    pms.set_defaults(func=cmd_modify_source)
+
+    pma = sub.add_parser("modify-apply", help="(无 LLM)读 agent 的 changes.json,显 diff,应用")
+    pma.add_argument("target")
+    pma.add_argument("--file", required=True, help="changes JSON 文件路径")
+    pma.add_argument("--summary", help="一句话改动摘要(写进 SKILL.md 历史)")
+    pma.add_argument("--yes", action="store_true")
+    pma.set_defaults(func=cmd_modify_apply)
     return p
 
 
