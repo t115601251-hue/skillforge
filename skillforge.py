@@ -664,6 +664,22 @@ def compute_t_score(meta: dict) -> int:
     return max(0, min(100, score))
 
 
+def compute_u_score(*, stars: int, watchers: int, forks: int,
+                    downloads, release_count: int, close_rate) -> int:
+    """使用度 0-100。spec §5.2。downloads/close_rate 允许 None。"""
+    def _log(n, ceiling):
+        return min(1.0, math.log10((n or 0) + 1) / math.log10(ceiling + 1))
+
+    w_s = _log(stars, 100000) * 20
+    w_w = _log(watchers, 10000) * 20
+    w_f = _log(forks, 10000) * 15
+    w_d = _log(downloads, 10000000) * 30 if downloads is not None else 0
+    w_r = min(release_count or 0, 20) / 20 * 10
+    w_c = (close_rate or 0) * 5
+
+    return int(round(max(0, min(100, w_s + w_w + w_f + w_d + w_r + w_c))))
+
+
 def compute_risk_flags(meta: dict) -> list:
     """风险标签 list。spec §5.3。"""
     if meta.get("archived"):

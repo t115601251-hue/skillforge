@@ -102,5 +102,38 @@ class TestRiskFlags(unittest.TestCase):
         self.assertEqual(skillforge.compute_risk_flags(_healthy_meta()), [])
 
 
+class TestUScore(unittest.TestCase):
+    def test_zero_signals(self):
+        score = skillforge.compute_u_score(
+            stars=0, watchers=0, forks=0,
+            downloads=None, release_count=0, close_rate=None,
+        )
+        self.assertEqual(score, 0)
+
+    def test_popular_package(self):
+        # rembg-like。实算约 84,放宽到 80 不损意图。
+        score = skillforge.compute_u_score(
+            stars=18000, watchers=320, forks=1900,
+            downloads=2400000, release_count=22, close_rate=0.92,
+        )
+        self.assertGreaterEqual(score, 80)
+        self.assertLessEqual(score, 100)
+
+    def test_missing_downloads_caps_below_100(self):
+        score = skillforge.compute_u_score(
+            stars=100000, watchers=10000, forks=10000,
+            downloads=None, release_count=20, close_rate=1.0,
+        )
+        self.assertLessEqual(score, 75)
+        self.assertGreater(score, 60)
+
+    def test_clamps_to_100(self):
+        score = skillforge.compute_u_score(
+            stars=10**9, watchers=10**9, forks=10**9,
+            downloads=10**9, release_count=10000, close_rate=1.0,
+        )
+        self.assertEqual(score, 100)
+
+
 if __name__ == "__main__":
     unittest.main()
