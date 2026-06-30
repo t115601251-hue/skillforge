@@ -704,6 +704,59 @@ def fetch_metadata(full_name: str, token=None) -> dict:
     return meta
 
 
+_RAW = "https://raw.githubusercontent.com"
+
+
+def _fetch_raw(full_name: str, branch: str, path: str) -> str:
+    """从 GitHub raw 拿文件文本,失败返回 ''。无 API rate limit。"""
+    url = f"{_RAW}/{full_name}/{branch}/{path}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "skillforge"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return r.read().decode("utf-8", "replace")
+    except Exception:
+        return ""
+
+
+def guess_package_name(full_name: str, default_branch: str, language: str):
+    """按 language 推 ecosystem,按文件优先级解析包名。
+    支持: Python(setup.py/pyproject.toml) / JavaScript|TypeScript(package.json) / Rust(Cargo.toml)。
+    其他语言返回 None。
+    """
+    lang = (language or "").lower()
+    repo_basename = full_name.split("/")[-1].lower().replace("_", "-")
+
+    if lang == "python":
+        text = _fetch_raw(full_name, default_branch, "setup.py")
+        m = re.search(r"name\s*=\s*['\"]([^'\"]+)['\"]", text)
+        if m:
+            return {"ecosystem": "pypi", "name": m.group(1)}
+        text = _fetch_raw(full_name, default_branch, "pyproject.toml")
+        m = re.search(r'^\s*name\s*=\s*"([^"]+)"', text, re.MULTILINE)
+        if m:
+            return {"ecosystem": "pypi", "name": m.group(1)}
+        return {"ecosystem": "pypi", "name": repo_basename}
+
+    if lang in {"javascript", "typescript"}:
+        text = _fetch_raw(full_name, default_branch, "package.json")
+        try:
+            data = json.loads(text)
+            if data.get("name"):
+                return {"ecosystem": "npm", "name": data["name"]}
+        except Exception:
+            pass
+        return None  # npm 命名严格,不冒猜
+
+    if lang == "rust":
+        text = _fetch_raw(full_name, default_branch, "Cargo.toml")
+        m = re.search(r'^\s*name\s*=\s*"([^"]+)"', text, re.MULTILINE)
+        if m:
+            return {"ecosystem": "cargo", "name": m.group(1)}
+        return {"ecosystem": "cargo", "name": repo_basename}
+
+    return None
+
+
 def fetch_close_rate(full_name: str, token=None):
     """返回 0-1 之间的 issue 闭合率,无历史/失败 → None。"""
     def _count(state):

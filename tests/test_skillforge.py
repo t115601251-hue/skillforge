@@ -161,6 +161,49 @@ class TestCloseRate(unittest.TestCase):
             self.assertIsNone(skillforge.fetch_close_rate("a/b", token="x"))
 
 
+class TestGuessPackageName(unittest.TestCase):
+    def test_pypi_setup_py(self):
+        setup_py = "from setuptools import setup\nsetup(name='rembg', version='2.0')\n"
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            urlopen.side_effect = [_raw_bytes(setup_py)]
+            r = skillforge.guess_package_name("danielgatis/rembg", "main", "Python")
+        self.assertEqual(r, {"ecosystem": "pypi", "name": "rembg"})
+
+    def test_pypi_pyproject(self):
+        pyproject = '[project]\nname = "rembg-cli"\nversion = "0.1"\n'
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            urlopen.side_effect = [
+                urllib.error.HTTPError("u", 404, "nope", {}, None),
+                _raw_bytes(pyproject),
+            ]
+            r = skillforge.guess_package_name("a/b", "main", "Python")
+        self.assertEqual(r, {"ecosystem": "pypi", "name": "rembg-cli"})
+
+    def test_npm_package_json(self):
+        pkg = '{"name": "my-tool", "version": "1.0.0"}'
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            urlopen.side_effect = [_raw_bytes(pkg)]
+            r = skillforge.guess_package_name("a/b", "main", "JavaScript")
+        self.assertEqual(r, {"ecosystem": "npm", "name": "my-tool"})
+
+    def test_cargo_toml(self):
+        cargo = '[package]\nname = "ripgrep"\nversion = "1.0"\n'
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            urlopen.side_effect = [_raw_bytes(cargo)]
+            r = skillforge.guess_package_name("a/b", "main", "Rust")
+        self.assertEqual(r, {"ecosystem": "cargo", "name": "ripgrep"})
+
+    def test_unsupported_language(self):
+        r = skillforge.guess_package_name("a/b", "main", "Go")
+        self.assertIsNone(r)
+
+    def test_all_files_404(self):
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=urllib.error.HTTPError("u", 404, "x", {}, None)):
+            r = skillforge.guess_package_name("foo/bar-baz", "main", "Python")
+        self.assertEqual(r, {"ecosystem": "pypi", "name": "bar-baz"})
+
+
 class TestUScore(unittest.TestCase):
     def test_zero_signals(self):
         score = skillforge.compute_u_score(
