@@ -43,7 +43,7 @@ description: 改一个已装 skill 的源码 (agent 做 LLM,skillforge 当工具
 
 **4. 应用**
 跑: `python {SKILLFORGE_PATH} modify-apply <target> --file /tmp/changes.json --summary "<用户原始需求>"`
-- 它会显 diff
+- 它会显 diff —— **⚠️ diff 完整原样转给用户,不要截断省略**,这是他决定 confirm/取消的唯一依据
 - 等用户 confirm(或 --yes 跳过)
 - 自动快照原版到 `versions/<name>/previous/`
 - 应用,SKILL.md 加 ✨[已定制]

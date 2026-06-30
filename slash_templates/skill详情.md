@@ -6,6 +6,8 @@ description: 看某个已装 skill 的详细信息
 
 跑: `python {SKILLFORGE_PATH} detail "$ARGUMENTS"`
 
+**⚠️ 输出原样完整转给用户,不要截断/省略任何一行**(detail 输出本来就不长,用户要看完整 description 才能判断要不要改/卸载)。
+
 它会显示:
 - 当前位置 (skill_dir)
 - 来源 GitHub URL
