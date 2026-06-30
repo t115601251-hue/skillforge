@@ -92,11 +92,32 @@ def version_dir(name: str, slot: str) -> Path:
     return Path(SKILLFORGE_VERSIONS).expanduser() / name / slot
 
 
+def _rmtree_force(path: Path):
+    """跨平台强删:Windows 上 git 的 .pack/.idx 文件带只读位,shutil.rmtree 默认 unlink 会拒绝。
+    回调里给文件加写权限再重试,解决 PermissionError [WinError 5]。
+    """
+    import shutil, stat
+    def _onerror(func, p, exc_info):
+        try:
+            os.chmod(p, stat.S_IWRITE | stat.S_IREAD)
+        except OSError:
+            pass
+        try:
+            func(p)
+        except OSError:
+            pass  # 真删不掉就算了,不能因为单文件挡住整个流程
+    # Python 3.12+ 用 onexc,老版本用 onerror
+    try:
+        shutil.rmtree(path, onexc=_onerror)
+    except TypeError:
+        shutil.rmtree(path, onerror=_onerror)
+
+
 def _copy_skill_into(src: Path, dest: Path):
-    """覆盖式复制 src 整个目录到 dest;dest 已存在先删。"""
+    """覆盖式复制 src 整个目录到 dest;dest 已存在先强删(处理 git 只读位)。"""
     import shutil
     if dest.exists():
-        shutil.rmtree(dest)
+        _rmtree_force(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(src, dest, symlinks=True)
 
@@ -1044,7 +1065,7 @@ def _fmt_int(n):
 
 def _stars(level: str) -> str:
     return {"强推": "⭐⭐⭐ 强推 ", "推荐": "⭐⭐ 推荐  ",
-            "谨慎": "⭐ 谨慎   ", "不推荐": "  不推荐  "}.get(level, level)
+            "谨慎": "⭐ 谨慎   ", "不推荐": "❌ 不推荐 "}.get(level, level)
 
 
 def render_top3(query: str, ranked: list, meta_by_name: dict, trusted_set: set) -> str:
@@ -1450,8 +1471,27 @@ def cmd_which(args):
             print(f"      用法: Codex 里输 ${s.name};Claude Code 描述需求即自动触发")
         return True
     print(f'❌ 本地没有能满足「{query}」的技能。')
-    print(f'   运行  skillforge find "{query}"  去 GitHub 找一个并安装。')
+    # 中文 query 在无 LLM 时关键词匹配几乎必败 — 主动提示
+    has_cjk = any("一" <= ch <= "鿿" for ch in query)
+    if has_cjk and not os.environ.get("ANTHROPIC_API_KEY"):
+        print(f'   ⚠️ 中文 query 在无 ANTHROPIC_API_KEY 时只能走关键词匹配,但已装 skill 的')
+        print(f'   description 都是英文 → 几乎必然 0 命中。两个选择:')
+        print(f'     a) 换英文 query 再试一次,如 "{_cjk_hint_en(query)}"')
+        print(f'     b) export ANTHROPIC_API_KEY 后跑,LLM 会做语义匹配')
+    print(f'   或运行  skillforge find "{query}"  去 GitHub 找一个并安装。')
     return False
+
+
+def _cjk_hint_en(cn_query: str) -> str:
+    """非常粗糙的中文 query 提示用英文关键词,只为给 cmd_which 失败时的一个 a) 建议方向。"""
+    hints = {"视频": "video", "短片": "short", "图片": "image", "文档": "doc",
+             "翻译": "translate", "压缩": "compress", "去背景": "remove background",
+             "OCR": "ocr", "写作": "writing", "作文": "essay", "代码": "code"}
+    out = []
+    for k, v in hints.items():
+        if k in cn_query:
+            out.append(v)
+    return " ".join(out) if out else "<英文关键词>"
 
 
 _MODIFY_SKIP_DIRS = {".git", ".skillforge", "node_modules", "__pycache__",
@@ -2159,16 +2199,25 @@ def cmd_modify_apply(args):
 
 def cmd_install(args):
     """/skill安装:把 target 装下来。target 可以是:
-    - "owner/repo" → 直接 find --repo --yes
-    - "1" → 上次 list 的编号(注意:这种情况其实是已经装过的,要重装/更新得 force-new)
+    - "owner/repo" → 先验仓库存在,再 find --repo --yes
+    - "1" → 上次 list 的编号(数字)
     - 已装的 name → 提示"已装,看详情用 detail"
+    - 不存在的 name → 明确报错,不要瞎跑安装流程
     """
     target = args.target
     if not target:
         print("用法: skillforge install <owner/repo|编号|name>", file=sys.stderr)
         sys.exit(2)
+
     if "/" in target:
-        # owner/repo 直接装
+        # owner/repo 直装路径:先验证仓库存在,避免双重错误污染
+        token = os.environ.get("GITHUB_TOKEN")
+        try:
+            gh_request(f"/repos/{target}", token)
+        except GHError as e:
+            print(f"❌ install 失败:{e}", file=sys.stderr)
+            return
+        # 验证通过,走完整 install 流程
         from argparse import Namespace
         find_args = Namespace(
             query=[target.split("/")[-1]],
@@ -2176,26 +2225,35 @@ def cmd_install(args):
             top=3, yes=True, force_new=True,
             no_star=args.no_star, install=args.install,
             no_register=False, copy=False,
-            simple=True, no_readme=True,  # 走 simple,避免 LLM 又拉一轮
+            simple=True, no_readme=True,  # simple 路径避免 LLM 再跑
         )
         cmd_find(find_args)
-        # 装完自动 intro
-        name = re.sub(r"[^a-z0-9-]+", "-", target.split("/")[-1].lower()).strip("-")
-        print("\n" + "─" * 60)
-        intro_args = Namespace(name=name)
-        cmd_intro(intro_args)
+        # 装完自动 intro(_install_chosen 末尾已经调过,这里再调一次会重复;_install_chosen 已有,此处不再额外调)
         return
-    # 数字编号或 name
-    resolved = resolve_skill(target)
-    if not resolved:
-        print(f"❌ 找不到 '{target}'。先 skillforge list 看编号,或直接给 owner/repo。", file=sys.stderr)
+
+    # 数字编号路径:必须真是数字才走 resolve
+    if target.isdigit():
+        resolved = resolve_skill(target)
+        if not resolved:
+            print(f"❌ 编号 {target} 越界或缓存过期。先 `skillforge list` 看现有编号。", file=sys.stderr)
+            return
+        skill_dir = Path(CANONICAL_HOME).expanduser() / resolved
+        if skill_dir.exists():
+            print(f"ℹ️  编号 {target} ({resolved}) 已经装过了。看详情用:`skillforge detail {target}`")
+            return
+        # 编号映射到了不存在的目录(理论上不该发生,除非 last_list.json 过期且 skill 已卸载)
+        print(f"❌ 编号 {target} 映射到 '{resolved}' 但实际目录不存在 — last_list.json 缓存过期。", file=sys.stderr)
+        print(f"   重跑 `skillforge list` 刷新编号缓存。", file=sys.stderr)
         return
-    # 已装的情况
-    skill_dir = Path(CANONICAL_HOME).expanduser() / resolved
+
+    # 当作 name 处理(非数字、非 owner/repo)
+    skill_dir = Path(CANONICAL_HOME).expanduser() / target
     if skill_dir.exists():
-        print(f"ℹ️  {resolved} 已经装过了。看详情用:skillforge detail {resolved}")
+        print(f"ℹ️  '{target}' 已经装过了。看详情用:`skillforge detail {target}`")
         return
-    print(f"❌ {resolved} 编号映射到了一个不存在的 skill,可能编号已过期。重跑 skillforge list 刷新。", file=sys.stderr)
+    print(f"❌ '{target}' 既不是已装的 skill 名,也不是数字编号,也不是 owner/repo 格式。", file=sys.stderr)
+    print(f"   要装 GitHub 仓库请用完整路径(如 `octocat/Hello-World`);", file=sys.stderr)
+    print(f"   要查已装请 `skillforge list`。", file=sys.stderr)
     """看一个 skill 的详情。args.target 可以是名字或编号。"""
     name = resolve_skill(args.target)
     if not name:
@@ -2240,22 +2298,50 @@ def cmd_install(args):
 
 
 def _template_intro(meta: dict, body: str) -> str:
-    """无 LLM 的模板版 intro。提取 description + 第一个 install 命令 + 触发词。"""
-    desc = meta.get("description", "").strip()
+    """无 LLM 的模板版 intro。提取 description + 第一个 install 命令 + 触发词。
+    手写 / 英文 description 没有标准"触发:" / ```bash 块时,改用 description 前 200 字+
+    "看 SKILL.md 学具体调用法" 这种朴实文案,不再瞎编。
+    """
+    desc = (meta.get("description") or "").strip()
     name = meta.get("name", "?")
-    # 从 body 抠第一个 ```bash code block
-    m = re.search(r"```(?:bash|shell)?\s*\n(.+?)\n```", body, re.DOTALL)
-    install = m.group(1).strip() if m else "(见 SKILL.md)"
-    # 从 description 抠"触发:..." 段
-    trig_m = re.search(r"触发[:：](.+?)(?:[;；]|$)", desc)
-    triggers = trig_m.group(1).strip() if trig_m else "(看 SKILL.md description)"
-    desc_short = re.split(r"[。.]\s*触发", desc, 1)[0] + "。" if "触发" in desc else desc[:120]
-    return (
-        f"✨ **{name}** 装好了\n\n"
-        f"做什么:{desc_short}\n\n"
-        f"怎么触发:跟 agent 说\"{triggers}\"相关的话\n\n"
-        f"装法(已经替你装好了,这是参考):`{install}`"
-    )
+
+    # 抠 install:任何 ```bash/shell/sh 代码块,或裸的 pip/npm/cargo 行
+    install = None
+    m = re.search(r"```(?:bash|shell|sh)?\s*\n(.+?)\n```", body, re.DOTALL)
+    if m:
+        install = m.group(1).strip().splitlines()[0]
+    else:
+        m2 = re.search(r"(?im)^\s*(pip install [^\n]+|npm install[^\n]*|cargo (?:build|install)[^\n]*|go install[^\n]+)", body)
+        if m2:
+            install = m2.group(1).strip()
+
+    # 抠触发词:优先中文 "触发:..." 段;再尝试 description 第一句关键名词
+    trig_m = re.search(r"触发[:：]([^;；。]+)", desc)
+    if trig_m:
+        triggers = trig_m.group(1).strip()
+    else:
+        # 退化:用 skill name 自身作为触发词("跟 agent 说 \"用 X 帮我...\"")
+        triggers = None
+
+    # 简短描述:取首句(中文 "。"或英文 ".")
+    first_sent = re.split(r"[。.]\s*", desc, maxsplit=1)[0]
+    if "触发" in first_sent:
+        first_sent = re.split(r"\s*触发", first_sent, maxsplit=1)[0]
+    desc_short = (first_sent.strip() or desc[:160]).rstrip("。.") + "。"
+
+    lines = [f"✨ **{name}** 装好了", ""]
+    lines.append(f"**做什么**:{desc_short}")
+    lines.append("")
+    if triggers:
+        lines.append(f"**怎么触发**:跟 agent 说\"{triggers}\"相关的话")
+    else:
+        lines.append(f"**怎么触发**:跟 agent 说\"用 {name} 帮我 ...\",或描述任何 {name} 能解决的具体场景")
+    lines.append("")
+    if install:
+        lines.append(f"**装法**(已经替你装好了,这是参考):`{install}`")
+    else:
+        lines.append(f"**装法**:已经替你装好,无需额外步骤(skillforge 已注册到所有 agent 目录)")
+    return "\n".join(lines)
 
 
 def _llm_intro(meta: dict, body: str) -> str:
@@ -2287,14 +2373,36 @@ def cmd_detail(args):
     meta = parse_frontmatter(md) or {"name": name, "description": ""}
 
     body = md.read_text(encoding="utf-8", errors="replace")
-    source_m = re.search(r"https://github\.com/[\w.\-]+/[\w.\-]+", body)
-    source_url = source_m.group(0) if source_m else "(SKILL.md 里没记录)"
-    inst_m = re.search(r"```(?:bash|shell)?\s*\n(.+?)\n```", body, re.DOTALL)
-    install_cmd = inst_m.group(1).strip() if inst_m else "(SKILL.md 里没记录)"
+    desc_text = meta.get("description") or ""
+
+    # 来源:GitHub URL 优先;退到 description / body 里搜 "owner/repo" 模式
+    source_m = re.search(r"https://github\.com/[\w.\-]+/[\w.\-]+", body + " " + desc_text)
+    if source_m:
+        source_url = source_m.group(0)
+    else:
+        # 再退:看 "仓库 owner/repo" 或 "底层项目: owner/repo"
+        m2 = re.search(r"(?:仓库|底层项目|repo|repository)[: :]+([\w.\-]+/[\w.\-]+)", desc_text + " " + body, re.IGNORECASE)
+        source_url = f"https://github.com/{m2.group(1)}" if m2 else "(SKILL.md 没记 source URL — 可能是手写或 adopted 版)"
+
+    # 安装命令:```bash/shell 块优先;退到任何 pip/npm/cargo 行
+    inst_m = re.search(r"```(?:bash|shell|sh)?\s*\n(.+?)\n```", body, re.DOTALL)
+    if inst_m:
+        install_cmd = inst_m.group(1).strip().splitlines()[0]
+    else:
+        m3 = re.search(r"(?im)^\s*(pip install [^\n]+|npm install[^\n]*|cargo (?:build|install)[^\n]+|go install[^\n]+)", body)
+        install_cmd = m3.group(1).strip() if m3 else "(没有标准安装命令 — 看 SKILL.md 正文)"
 
     has_pristine = version_dir(name, "pristine").exists()
     has_previous = version_dir(name, "previous").exists()
-    is_custom = "✨" in (meta.get("description") or "")
+    is_custom = "✨" in desc_text
+
+    # pristine 缺失时,根据 description 长度 + .skillforge/ 痕迹,推测是 adopted / 手装 / 还是 skillforge install
+    pristine_note = ""
+    if not has_pristine:
+        if len(desc_text) > 200:
+            pristine_note = "  (大概率是 adopted 手写版或外部手装,不是 skillforge install)"
+        else:
+            pristine_note = "  (可能是 v3 之前装的,rollback --pristine 不可用)"
 
     print(f"━━━ {name} ━━━\n")
     print(f"📂 当前位置: {skill_dir}")
@@ -2302,10 +2410,10 @@ def cmd_detail(args):
     print(f"📥 安装命令: {install_cmd}")
     print(f"🏷  定制状态: {'✨ 已定制过' if is_custom else '(未定制)'}")
     print(f"💾 版本快照:")
-    print(f"     pristine (github 原版): {'✓ 存在(可 rollback --pristine)' if has_pristine else '✗ 缺失'}")
+    print(f"     pristine (github 原版): {'✓ 存在(可 rollback --pristine)' if has_pristine else '✗ 缺失' + pristine_note}")
     print(f"     previous (上次修改前):   {'✓ 存在(可 rollback)' if has_previous else '✗ 还没修改过'}")
     print(f"     current (在用):          ✓")
-    print(f"\n📝 描述:\n{meta.get('description','(无)')}\n")
+    print(f"\n📝 描述:\n{desc_text or '(无)'}\n")
     print(f"调用例子: 跟 agent 说\"用 {name} ...\" 即可触发,或 `skillforge intro {name}` 看简介。")
 
 
