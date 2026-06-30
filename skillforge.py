@@ -1272,6 +1272,94 @@ def confirm(prompt, assume_yes=False):
 
 
 # ----------------------------------------------------------------------------- 命令
+CATALOG_FILE = os.environ.get("SKILLFORGE_CATALOG", "~/.skillforge/CATALOG.md")
+
+
+def generate_catalog(out_path=None) -> Path:
+    """生成/更新 CATALOG.md:全部已装 skill 的完整目录。
+    包含三段(普通/已定制/被遮蔽)+ 每个 skill 完整 description + 来源 + 版本快照状态。
+    自动在所有 mutation 操作(install/uninstall/modify/consolidate/self-install)末尾被调用。
+    """
+    import datetime as _dt
+    skills, shadowed = scan_local()
+    custom, regular = [], []
+    for s in skills:
+        (custom if _is_customized(s.name) else regular).append(s)
+
+    out = Path(out_path or CATALOG_FILE).expanduser()
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    now = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    lines = [
+        "# SkillForge 本地技能目录",
+        "",
+        f"> 自动生成于 {now} —— **不要手工编辑**,任何 skillforge install/uninstall/modify 操作都会覆盖。",
+        "",
+        f"- 🟢 普通已装: **{len(regular)}** 个",
+        f"- 🟡 已定制(改过源码): **{len(custom)}** 个",
+        f"- ⚪ 被遮蔽副本: **{len(shadowed)}** 个",
+        f"- 合计活跃 skill: **{len(skills)}** 个",
+        "",
+        "## 目录",
+        "",
+    ]
+    if regular:
+        lines.append("### 🟢 普通已装")
+        for s in sorted(regular, key=lambda x: x.name.lower()):
+            lines.append(f"- [{s.name}](#{s.name.lower().replace(' ','-')})")
+        lines.append("")
+    if custom:
+        lines.append("### 🟡 已定制")
+        for s in sorted(custom, key=lambda x: x.name.lower()):
+            lines.append(f"- [✨ {s.name}](#-{s.name.lower().replace(' ','-')})")
+        lines.append("")
+    if shadowed:
+        lines.append("### ⚪ 被遮蔽")
+        for s in shadowed:
+            lines.append(f"- ✕ {s.name} — {s.path}")
+        lines.append("")
+    lines.append("---")
+    lines.append("")
+
+    def _render_one(s, customized=False):
+        ver_root = Path(SKILLFORGE_VERSIONS).expanduser() / s.name
+        has_pristine = (ver_root / "pristine").exists()
+        has_previous = (ver_root / "previous").exists()
+        ver_str = "  · ".join(filter(None, [
+            "🟢 pristine" if has_pristine else None,
+            "🟡 previous" if has_previous else None,
+            "🔵 current",
+        ]))
+        marker = "✨ " if customized else ""
+        return [
+            f"### {marker}{s.name}",
+            "",
+            f"**Description**:",
+            "",
+            f"> {s.description or '(无)'}",
+            "",
+            f"- **位置**: `{s.path}`",
+            f"- **版本快照**: {ver_str}",
+            "",
+            "---",
+            "",
+        ]
+
+    if regular:
+        lines.append("## 🟢 普通已装(完整描述)")
+        lines.append("")
+        for s in sorted(regular, key=lambda x: x.name.lower()):
+            lines.extend(_render_one(s, customized=False))
+    if custom:
+        lines.append("## 🟡 已定制(完整描述)")
+        lines.append("")
+        for s in sorted(custom, key=lambda x: x.name.lower()):
+            lines.extend(_render_one(s, customized=True))
+
+    out.write_text("\n".join(lines), encoding="utf-8")
+    return out
+
+
 def _is_customized(name: str) -> bool:
     """根据 SKILL.md description 是否含 ✨ 标识判断是否被客制化过。"""
     p = Path(CANONICAL_HOME).expanduser() / name / "SKILL.md"
@@ -1282,6 +1370,7 @@ def _is_customized(name: str) -> bool:
 
 
 def cmd_list(args):
+    import textwrap as _tw
     skills, shadowed = scan_local()
     if not skills:
         print("(没有找到已安装的技能)")
@@ -1292,6 +1381,18 @@ def cmd_list(args):
     for s in skills:
         (custom if _is_customized(s.name) else regular).append(s)
 
+    def _print_desc(desc: str, brief: bool):
+        if not desc:
+            return
+        if brief:
+            print(f"        {desc[:88]}")
+        else:
+            # 完整描述,折行到 72 字符宽,8 空格缩进
+            wrapped = _tw.fill(desc, width=72,
+                               initial_indent="        ",
+                               subsequent_indent="        ")
+            print(wrapped)
+
     # 统一编号:先 regular,再 custom,再 shadow
     mapping = {}
     n = 1
@@ -1299,8 +1400,7 @@ def cmd_list(args):
     for s in regular:
         mapping[n] = s.name
         print(f"  [{n:>3}] {s.name}")
-        if s.description:
-            print(f"        {s.description[:88]}")
+        _print_desc(s.description, brief=args.brief)
         n += 1
     if custom:
         print(f"\n🟡 已定制(改过源码)  {len(custom)} 个")
@@ -1308,9 +1408,8 @@ def cmd_list(args):
             mapping[n] = s.name
             print(f"  [{n:>3}] ✨ {s.name}")
             if s.description:
-                # 去掉 ✨[已定制] 前缀只显示真 description
                 d = s.description.lstrip("✨").lstrip("[已定制]").lstrip().lstrip(":").lstrip()
-                print(f"        {d[:88]}")
+                _print_desc(d, brief=args.brief)
             n += 1
     if shadowed:
         print(f"\n⚪ 被遮蔽副本  {len(shadowed)} 个(同名时优先 SKILLFORGE_HOME > 用户级)")
@@ -1319,7 +1418,14 @@ def cmd_list(args):
         print("  可以合并到 SKILLFORGE_HOME 后用软链统一,或删除冗余副本。")
 
     save_last_list(mapping)
-    print(f"\n后续 `skillforge detail <编号>` 看详情,`skillforge install <编号|name|owner/repo>` 装。")
+
+    # 顺手刷新 CATALOG.md(把全部完整描述写盘,便于离线 / 别处查)
+    try:
+        cat = generate_catalog()
+        print(f"\n📜 完整目录(完整描述 + 版本状态)已写到: {cat}")
+    except Exception as e:
+        print(f"\n[warn] 生成 CATALOG.md 失败: {e}", file=sys.stderr)
+    print(f"   后续 `skillforge detail <编号>` 看单个详情,`skillforge install <编号|owner/repo>` 装。")
 
     if args.json:
         print("\n" + json.dumps(
@@ -1648,6 +1754,12 @@ def cmd_uninstall(args):
     if len(new_ll) != len(ll):
         save_last_list(new_ll)
 
+    # v6: 自动刷新 CATALOG.md
+    try:
+        generate_catalog()
+    except Exception:
+        pass
+
     print(f"\n✅ {name} 已卸载。所有数据搬到 backups/,误删可恢复。")
 
 
@@ -1824,6 +1936,12 @@ def cmd_self_install(args):
                 except OSError as e:
                     print(f"   ⚠️ {dest}: {e}", file=sys.stderr)
         print(f"   ✓ {host}: {count} 个 → {commands_dir}")
+
+    # v6: 自动刷新 CATALOG.md(把 skillforge 自身也算进去)
+    try:
+        generate_catalog()
+    except Exception:
+        pass
 
     print(f"\n✅ 完成。共部署 {deployed} 个 slash 文件(每家中文+ASCII 双份)。")
     print(f"   在 agent 输 / 时,中文型 (/skill帮助) 和 ASCII 型 (/skill-help) 都能用;")
@@ -2030,6 +2148,12 @@ def cmd_modify_apply(args):
     save_previous(name, skill_dir)
     _apply_changes(changes, skill_dir)
     _update_customization_meta(name, request)
+    # v6: 自动刷新 CATALOG.md(✨[已定制] 标记会反映)
+    try:
+        generate_catalog()
+    except Exception:
+        pass
+
     print(f"\n✅ 改完。回滚: skillforge rollback {name}")
 
 
@@ -2283,6 +2407,12 @@ def cmd_consolidate(args):
             print(f"  ❌ {name}: {e}")
             fail += 1
 
+    # v6: 自动刷新 CATALOG.md
+    try:
+        generate_catalog()
+    except Exception:
+        pass
+
     print(f"\n完成 {done}/{len(plan)} 组(失败 {fail})。所有被替换的原目录已搬到 {Path(BACKUP_HOME).expanduser()}。")
 
 
@@ -2431,6 +2561,12 @@ def _install_chosen(args, chosen: dict, token):
         save_pristine(name, skill_dir)
     except Exception as e:
         print(f"  [warn] 写 pristine 版本失败:{e}", file=sys.stderr)
+
+    # v6: 自动刷新 CATALOG.md
+    try:
+        generate_catalog()
+    except Exception as e:
+        print(f"  [warn] 刷新 CATALOG.md 失败:{e}", file=sys.stderr)
 
     print(f"\n✅ 完成。下次再问类似需求,会直接命中本地技能 `{name}`。\n")
     # v3: 装完自动 intro
@@ -2644,7 +2780,12 @@ def build_parser():
 
     pl = sub.add_parser("list", help="列出已装技能(跨 agent 去重)")
     pl.add_argument("--json", action="store_true")
+    pl.add_argument("--brief", action="store_true", help="只显示前 88 字符 description(传统紧凑模式)")
     pl.set_defaults(func=cmd_list)
+
+    pcat = sub.add_parser("catalog", help="手动重生成 ~/.skillforge/CATALOG.md")
+    pcat.add_argument("--path", help="覆盖输出位置")
+    pcat.set_defaults(func=lambda a: print(f"📜 写入 {generate_catalog(a.path)}"))
 
     pw = sub.add_parser("which", help="查本地有没有能满足需求的技能")
     pw.add_argument("query", nargs="+")
