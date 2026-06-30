@@ -757,6 +757,64 @@ def guess_package_name(full_name: str, default_branch: str, language: str):
     return None
 
 
+def _llm_call(prompt: str, max_tokens: int = 1024, model: str = None):
+    """Anthropic Messages 单轮调用,返回 text 字符串。无 key 或失败 → None。"""
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if not key:
+        return None
+    body = json.dumps({
+        "model": model or ANTHROPIC_MODEL,
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": prompt}],
+    }).encode()
+    req = urllib.request.Request(ANTHROPIC_API, data=body, method="POST", headers={
+        "content-type": "application/json",
+        "x-api-key": key,
+        "anthropic-version": "2023-06-01",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            data = json.load(r)
+        return "".join(b.get("text", "") for b in data.get("content", [])).strip()
+    except Exception as e:
+        print(f"  [warn] LLM 调用失败: {e}", file=sys.stderr)
+        return None
+
+
+def _strip_code_fence(text: str) -> str:
+    if not text:
+        return ""
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
+        text = re.sub(r"\n?```\s*$", "", text).strip()
+    return text
+
+
+def llm_rewrite_query(query: str) -> list:
+    """中文需求 → 3 个不同角度的英文 query。无 key / 解析失败 → [原始 query]。"""
+    text = _llm_call(
+        "你在帮一个跨 agent 技能管理工具改写用户的中文需求,以提高 GitHub 搜索召回率。\n\n"
+        "请把下面这条中文需求改写成 3 个不同角度的英文 GitHub 搜索关键词:\n"
+        "- 角度 1: 按\"能力/功能\"措辞 (e.g. \"remove image background\")\n"
+        "- 角度 2: 按\"工具/CLI\"措辞 (e.g. \"image background removal cli\")\n"
+        "- 角度 3: 按\"技术栈/方案\"措辞 (e.g. \"rembg python ai\")\n\n"
+        "每个 3-6 个词,纯小写,不要引号、不要标点。\n\n"
+        f'输入: "{query}"\n\n'
+        '只输出一个 JSON 数组 (3 个字符串), 不要任何其他文字:\n["...", "...", "..."]',
+        max_tokens=300,
+    )
+    if not text:
+        return [query]
+    try:
+        arr = json.loads(_strip_code_fence(text))
+        if isinstance(arr, list) and all(isinstance(x, str) and x.strip() for x in arr):
+            return [x.strip() for x in arr][:3]
+    except Exception:
+        pass
+    return [query]
+
+
 def fetch_downloads(ecosystem: str, name: str):
     """月下载量;失败/未知 ecosystem 返回 None。免认证公开端点。"""
     if not name:

@@ -238,6 +238,31 @@ class TestFetchDownloads(unittest.TestCase):
             self.assertIsNone(skillforge.fetch_downloads("pypi", "this-pkg-doesnt-exist-9999"))
 
 
+class TestLLMRewrite(unittest.TestCase):
+    def test_no_key_returns_original_only(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+            r = skillforge.llm_rewrite_query("批量去图片背景")
+        self.assertEqual(r, ["批量去图片背景"])
+
+    def test_with_key_parses_json(self):
+        api_payload = {"content": [{"text": '["remove image background", "image background removal cli", "rembg python ai"]'}]}
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "fake"}):
+            with mock.patch("urllib.request.urlopen") as urlopen:
+                urlopen.return_value = _mock_response(api_payload)
+                r = skillforge.llm_rewrite_query("批量去图片背景")
+        self.assertEqual(len(r), 3)
+        self.assertIn("rembg python ai", r)
+
+    def test_bad_json_returns_original(self):
+        api_payload = {"content": [{"text": "对不起我不会"}]}
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "fake"}):
+            with mock.patch("urllib.request.urlopen") as urlopen:
+                urlopen.return_value = _mock_response(api_payload)
+                r = skillforge.llm_rewrite_query("批量去图片背景")
+        self.assertEqual(r, ["批量去图片背景"])
+
+
 class TestUScore(unittest.TestCase):
     def test_zero_signals(self):
         score = skillforge.compute_u_score(
