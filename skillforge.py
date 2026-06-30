@@ -1990,37 +1990,35 @@ def cmd_suggest(args):
         print("(本地没有任何已装 skill)")
         return
 
-    # 1) 先按 match_local 拿命中(关键词加权;有 LLM 走 LLM)
-    matches = match_local(query, skills, threshold=0.0)  # 不卡阈值,要全部排序
-
-    # 2) 没命中或匹配度都很低 → 按 category 关键词匹配回退
+    # 1) 关键词匹配(阈值 0.15 — 必须真有 keyword 命中才进候选,
+    #    避免 0-base 高-spec 的 skill 因 composite 高而抢前排)
+    matches = match_local(query, skills, threshold=0.15)
     has_cjk = any("一" <= ch <= "鿿" for ch in query)
-    if not matches or (matches and matches[0][1] < 0.3):
-        # 关键词法 0 命中,再按 category 名字模糊撞
+
+    # 2) 关键词 0 命中 → 退到 category 名字模糊匹配
+    if not matches:
         ql = query.lower()
         cat_hits = []
         for s in skills:
             cat = skill_category(s.name, {"name": s.name, "description": s.description})
-            # 中文 query 命中 emoji+中文 cat 名;英文 query 命中 cat 名
             if any(part in cat or part in s.name.lower() for part in ql.split() if len(part) >= 2):
-                cat_hits.append((s, 0.5))
+                cat_hits.append((s, 0.3))  # 给个 base=0.3,刚过阈值
         if cat_hits:
             matches = cat_hits[:10]
 
-    # 3) 把 specificity / usage 一起合权重排
+    # 3) 合 specificity / usage 权重排
     scored = []
     for s, base in matches[:20]:
         meta = {"name": s.name, "description": s.description}
-        spec = skill_specificity(meta) / 12  # 归一化 (0-12 范围)
-        usage = min(1.0, usage_count(s.name) / 5)  # 5+ 次封顶
+        spec = skill_specificity(meta) / 12
+        usage = min(1.0, usage_count(s.name) / 5)
         composite = 0.55 * base + 0.30 * spec + 0.15 * usage
         scored.append((s, composite, base, spec, usage))
     scored.sort(key=lambda x: -x[1])
     top = scored[:3]
 
-    # 真没命中:top 1 的 base 关键词分都 < 0.15,直接告诉用户,别硬凑 Top 3
-    # (composite 因为 specificity 加权,即使关键词 0 命中也可能 0.3,所以不能用 composite 判)
-    if not top or top[0][2] < 0.15:
+    # 真没命中:matches 完全空(关键词 0.15 阈值都没过 + category 也没匹配)
+    if not top:
         print(f"\n🎯 「{query}」 → 本地没匹配的 skill。\n")
         if has_cjk and not os.environ.get("ANTHROPIC_API_KEY"):
             print("   ⚠️ 中文 query + 无 ANTHROPIC_API_KEY → 关键词法必败")
