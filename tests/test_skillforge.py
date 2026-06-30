@@ -568,6 +568,96 @@ class TestLastListCache(unittest.TestCase):
         self.assertIsNone(skillforge.resolve_skill("99"))
 
 
+class TestCategorize(unittest.TestCase):
+    """v8: skill 分类规则匹配 + cache。"""
+    def test_letta_prefix_wins(self):
+        meta = {"name": "letta-foo", "description": "anything"}
+        self.assertTrue(skillforge.categorize_skill(meta).startswith("🤖 Letta"))
+
+    def test_gsap_prefix_only(self):
+        # 只匹配 gsap-* 前缀,不被泛 "animation" 抢
+        meta = {"name": "gsap-react", "description": "Official GSAP skill for React"}
+        self.assertTrue(skillforge.categorize_skill(meta).startswith("🌊 GSAP"))
+
+    def test_figma_wins(self):
+        meta = {"name": "figma-implement", "description": "translate figma to code"}
+        self.assertTrue(skillforge.categorize_skill(meta).startswith("🖼 Figma"))
+
+    def test_playwright_is_browser_not_image(self):
+        # 重要:playwright 描述含 "screenshot" 但应归浏览器,不归图像
+        meta = {"name": "playwright", "description": "automate a real browser, screenshots, data extraction"}
+        self.assertTrue(skillforge.categorize_skill(meta).startswith("🌐 浏览器"))
+
+    def test_impeccable_is_taste_not_browser(self):
+        meta = {"name": "impeccable", "description": "anti-slop frontend audit, live browser iteration on UI"}
+        self.assertTrue(skillforge.categorize_skill(meta).startswith("✨ 前端审美"))
+
+    def test_transcribe_is_video_audio(self):
+        meta = {"name": "transcribe", "description": "Transcribe audio files to text"}
+        self.assertTrue(skillforge.categorize_skill(meta).startswith("🎬 视频音频"))
+
+    def test_unknown_falls_to_其它(self):
+        meta = {"name": "totally-random", "description": "nothing matches anything"}
+        self.assertTrue(skillforge.categorize_skill(meta).endswith("其它"))
+
+
+class TestSpecificity(unittest.TestCase):
+    """v8: skill_specificity 多轴评分。"""
+    def test_strong_use_when_high(self):
+        meta = {"name": "very-specific-skill", "description": "Use when user asks for X. Do not use for Y. 触发:a、b、c"}
+        self.assertGreaterEqual(skillforge.skill_specificity(meta), 8)
+
+    def test_short_generic_low(self):
+        meta = {"name": "ai", "description": "general purpose"}
+        self.assertLessEqual(skillforge.skill_specificity(meta), 0)
+
+    def test_many_hyphens_more_specific(self):
+        a = skillforge.skill_specificity({"name": "foo", "description": "x"})
+        b = skillforge.skill_specificity({"name": "foo-bar-baz", "description": "x"})
+        self.assertGreater(b, a)
+
+
+class TestUsageStats(unittest.TestCase):
+    """v8: usage_stats 持久化."""
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp(prefix="skf_usage_")
+        self._orig = skillforge.USAGE_STATS_FILE
+        skillforge.USAGE_STATS_FILE = str(Path(self.tmp) / "u.json")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        skillforge.USAGE_STATS_FILE = self._orig
+
+    def test_bump_then_count(self):
+        self.assertEqual(skillforge.usage_count("foo"), 0)
+        skillforge.usage_bump("foo")
+        skillforge.usage_bump("foo")
+        skillforge.usage_bump("bar")
+        self.assertEqual(skillforge.usage_count("foo"), 2)
+        self.assertEqual(skillforge.usage_count("bar"), 1)
+
+
+class TestSuggestHelpers(unittest.TestCase):
+    """v8: _extract_clause + _sort_by_priority。"""
+    def test_extract_use_when_english(self):
+        desc = "Some intro. Use when user asks for X. More text."
+        r = skillforge._extract_clause(desc, [r"Use when ([^.。\n]+)"])
+        self.assertEqual(r, "user asks for X")
+
+    def test_extract_dont_use_for_english(self):
+        desc = "...Do not use for huge files. Use compress instead."
+        r = skillforge._extract_clause(desc, [r"Do not use (?:for |when )([^.。\n]+)"])
+        self.assertEqual(r, "huge files")
+
+    def test_extract_returns_none_no_match(self):
+        r = skillforge._extract_clause("plain description", [r"Use when ([^.\n]+)"])
+        self.assertIsNone(r)
+
+
+from pathlib import Path  # for TestUsageStats setUp
+
 class TestModifyFlow(unittest.TestCase):
     """cmd_modify 的纯函数部分:文件读取 / diff 应用 / frontmatter 改写。LLM 调用本身不测(走真 API)。"""
     def setUp(self):
