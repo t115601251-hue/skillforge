@@ -137,6 +137,30 @@ class TestFetchMetadata(unittest.TestCase):
         self.assertNotIn("🔴 已归档", meta["risk_flags"])
 
 
+class TestCloseRate(unittest.TestCase):
+    def test_normal(self):
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            urlopen.side_effect = [
+                _mock_response({"total_count": 90}),
+                _mock_response({"total_count": 10}),
+            ]
+            rate = skillforge.fetch_close_rate("a/b", token="x")
+        self.assertAlmostEqual(rate, 0.9)
+
+    def test_no_history(self):
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            urlopen.side_effect = [
+                _mock_response({"total_count": 0}),
+                _mock_response({"total_count": 0}),
+            ]
+            self.assertIsNone(skillforge.fetch_close_rate("a/b", token="x"))
+
+    def test_api_error_returns_none(self):
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=urllib.error.HTTPError("u", 403, "x", {}, None)):
+            self.assertIsNone(skillforge.fetch_close_rate("a/b", token="x"))
+
+
 class TestUScore(unittest.TestCase):
     def test_zero_signals(self):
         score = skillforge.compute_u_score(

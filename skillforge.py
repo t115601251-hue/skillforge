@@ -704,6 +704,24 @@ def fetch_metadata(full_name: str, token=None) -> dict:
     return meta
 
 
+def fetch_close_rate(full_name: str, token=None):
+    """返回 0-1 之间的 issue 闭合率,无历史/失败 → None。"""
+    def _count(state):
+        q = urllib.parse.quote(f"type:issue repo:{full_name} is:{state}")
+        path = f"/search/issues?q={q}&per_page=1"
+        _, data = gh_request(path, token)
+        return (data or {}).get("total_count", 0)
+    try:
+        closed = _count("closed")
+        open_ = _count("open")
+    except Exception:
+        return None
+    total = closed + open_
+    if total == 0:
+        return None
+    return closed / total
+
+
 def compute_u_score(*, stars: int, watchers: int, forks: int,
                     downloads, release_count: int, close_rate) -> int:
     """使用度 0-100。spec §5.2。downloads/close_rate 允许 None。"""
