@@ -1,6 +1,6 @@
 # skillforge — 跨 agent 的技能闭环管理工具
 
-![python](https://img.shields.io/badge/python-3.10+-blue) ![deps](https://img.shields.io/badge/runtime%20deps-zero-brightgreen) ![license](https://img.shields.io/badge/license-MIT-green) ![tests](https://img.shields.io/badge/unittest-68%20passing-brightgreen) ![architecture](https://img.shields.io/badge/architecture-agent--as--LLM-purple)
+![python](https://img.shields.io/badge/python-3.10+-blue) ![deps](https://img.shields.io/badge/runtime%20deps-zero-brightgreen) ![license](https://img.shields.io/badge/license-MIT-green) ![tests](https://img.shields.io/badge/unittest-82%20passing-brightgreen) ![architecture](https://img.shields.io/badge/architecture-agent--as--LLM-purple) ![commands](https://img.shields.io/badge/subcommands-20-orange) ![categories](https://img.shields.io/badge/auto--categories-27-blueviolet)
 
 > **一句话**:用户用自然语言说需求 → 先查本地装没装过能干这事的技能 → 有就告诉他怎么用,没有就去 GitHub 找、安全审查、自动写成一个能被各 agent (Claude Code / Codex / OpenClaw) 发现的技能,**所有 LLM 推理由调用方 agent 自己做**。
 
@@ -13,24 +13,25 @@
 git clone https://github.com/t115601251-hue/skillforge.git
 cd skillforge
 
-# 2. 自部署:写自身 SKILL.md + 9 个 slash 命令到 Claude Code / Codex / OpenClaw
+# 2. 自部署:写自身 SKILL.md + 11 个 slash 命令(中文 + ASCII 别名共 21 文件)
 python skillforge.py self-install
 
 # 3. 在 agent chat 里(或直接 CLI):
-python skillforge.py list                          # 看已装
-python skillforge.py which "我想做的事"             # 查本地有没有
-python skillforge.py find-data "<q1>" "<q2>" "<q3>"  # 拉候选(无 LLM 数据采集)
+python skillforge.py list                # 按 27 类分段看已装(74+ 个 skill)
+python skillforge.py suggest "去图背景"   # 自然语言路由 → 本地 Top 3 Markdown 表
+python skillforge.py find "image OCR"    # 去 GitHub 找新的(LLM + 安全审)
 ```
 
 设了 `GITHUB_TOKEN`(避免匿名 60/h 限流)效果最好;`ANTHROPIC_API_KEY` 可选(老版本直接调 API 路径需要,v4 agent-as-LLM 路径不需要)。
 
-## 三种核心场景
+## 四种核心场景
 
 | 场景 | 命令 | 干什么 |
 |---|---|---|
-| **查本地** | `which "<需求>"` | 加权关键词匹配已装技能,泛词降权 |
-| **找新的** | `/skill查找 <需求>` | agent 改写 query → 多搜 → 安全审 → Top 3 + R/U/T 三维分 |
-| **客制化** | `/skill修改 <name> <需求>` | agent 读源码出 diff → 自动快照 → 应用,可一键回滚 |
+| **看本地** | `list` 或 `/skill列表` | 按 27 类分段,每类按 specificity+usage+name 三轴排;`--cat 部署` 只看一类 |
+| **本地路由** | `suggest "<需求>"` 或 `/skill建议` | 从已装推 Top 3 (Markdown 表 + "适合/不适合"列),不联网 |
+| **找新的** | `find "<需求>"` 或 `/skill查找` | 去 GitHub:agent 三角度改写 → Scorecard+OSV 安全审 → Top 3 + R/U/T 三维分 |
+| **客制化** | `modify <name> <需求>` 或 `/skill修改` | agent 读源码出 diff → 自动快照三槽位 → 应用,可一键回滚 |
 
 ---
 
