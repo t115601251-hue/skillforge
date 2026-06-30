@@ -316,6 +316,41 @@ class TestFinalRank(unittest.TestCase):
         self.assertEqual(top[0]["recommend_level"], "强推")
 
 
+class TestRenderTop3(unittest.TestCase):
+    def test_contains_key_fields(self):
+        ranked = [{
+            "full_name": "danielgatis/rembg", "R": 9,
+            "recommend_level": "强推", "why": "行业标准",
+            "risks": [],
+        }]
+        meta = {"danielgatis/rembg": {
+            "full_name": "danielgatis/rembg", "language": "Python",
+            "stargazers_count": 18000, "subscribers_count": 320, "forks_count": 1900,
+            "monthly_downloads": 2400000, "release_count": 22, "close_rate": 0.92,
+            "U": 92, "T": 85, "install_cmds": ["pip install rembg"],
+        }}
+        text = skillforge.render_top3("批量去图片背景", ranked, meta, trusted_set=set())
+        self.assertIn("批量去图片背景", text)
+        self.assertIn("danielgatis/rembg", text)
+        self.assertIn("R 相关 9/10", text)
+        self.assertIn("U 使用 92/100", text)
+        self.assertIn("T 治理 85/100", text)
+        self.assertIn("强推", text)
+        self.assertIn("行业标准", text)
+        self.assertIn("pip install rembg", text)
+
+    def test_renders_risks(self):
+        ranked = [{"full_name": "x/y", "R": 7, "recommend_level": "推荐",
+                   "why": "...", "risks": ["仓库太新", "单一维护者"]}]
+        meta = {"x/y": {"full_name": "x/y", "language": "Python",
+                        "stargazers_count": 1, "subscribers_count": 1, "forks_count": 0,
+                        "monthly_downloads": None, "release_count": 0, "close_rate": None,
+                        "U": 5, "T": 50, "install_cmds": []}}
+        text = skillforge.render_top3("q", ranked, meta, trusted_set=set())
+        self.assertIn("仓库太新", text)
+        self.assertIn("单一维护者", text)
+
+
 class TestUScore(unittest.TestCase):
     def test_zero_signals(self):
         score = skillforge.compute_u_score(

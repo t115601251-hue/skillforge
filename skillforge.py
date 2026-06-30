@@ -931,6 +931,48 @@ def llm_final_rank(query: str, candidates: list) -> list:
     return _final_heuristic(candidates)
 
 
+def _fmt_int(n):
+    if n is None: return "无数据"
+    if n >= 1_000_000: return f"{n/1_000_000:.1f}M"
+    if n >= 1_000: return f"{n/1_000:.1f}k"
+    return str(n)
+
+
+def _stars(level: str) -> str:
+    return {"强推": "⭐⭐⭐ 强推 ", "推荐": "⭐⭐ 推荐  ",
+            "谨慎": "⭐ 谨慎   ", "不推荐": "  不推荐  "}.get(level, level)
+
+
+def render_top3(query: str, ranked: list, meta_by_name: dict, trusted_set: set) -> str:
+    """ranked:llm_final_rank 输出;meta_by_name: full_name → 完整 meta(含 install_cmds);trusted_set:owner 白名单集合。"""
+    lines = [f"🔎 「{query}」 → Top {len(ranked)}\n"]
+    for i, item in enumerate(ranked):
+        fn = item["full_name"]
+        m = meta_by_name.get(fn, {})
+        installs = m.get("install_cmds") or []
+        install_str = installs[0] if installs else "(无标准安装方式)"
+        owner = fn.split("/")[0].lower()
+        trusted = "是" if (owner in trusted_set or fn.lower() in trusted_set) else "否"
+
+        rate_str = (f"{int((m.get('close_rate') or 0) * 100)}%"
+                    if m.get("close_rate") is not None else "无历史")
+        lines.append(f"  [{i}] {_stars(item.get('recommend_level',''))}  {fn}  ({m.get('language','')})")
+        lines.append(f"      R 相关 {item.get('R',0)}/10  ·  U 使用 {m.get('U',0)}/100  ·  T 治理 {m.get('T',0)}/100")
+        lines.append(
+            f"      ★ {_fmt_int(m.get('stargazers_count'))}  "
+            f"👁 {_fmt_int(m.get('subscribers_count'))}  "
+            f"🔱 {_fmt_int(m.get('forks_count'))}  "
+            f"📥 {_fmt_int(m.get('monthly_downloads'))}  "
+            f"📦 {m.get('release_count',0)} release  "
+            f"💬 {rate_str} 闭合"
+        )
+        lines.append(f"      推荐: {item.get('why','')}")
+        risks = item.get("risks") or []
+        lines.append(f"      风险: {'  '.join(risks) if risks else '(无)'}")
+        lines.append(f"      装: {install_str}     owner ∈ trusted? {trusted}\n")
+    return "\n".join(lines)
+
+
 def fetch_downloads(ecosystem: str, name: str):
     """月下载量;失败/未知 ecosystem 返回 None。免认证公开端点。"""
     if not name:
