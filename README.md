@@ -160,17 +160,33 @@ python skillforge.py self-install   # 一次性自部署:写自身 SKILL.md + 9 
 
 | 中文 slash | ASCII 别名 | 行为 |
 |---|---|---|
-| `/skill查找 <需求>` | `/skill-find <需求>` | LLM 流水线找 Top 3 推荐 |
+| `/skill查找 <需求>` | `/skill-find <需求>` | 去 GitHub 找:LLM 流水线 Top 3 推荐 |
+| `/skill建议 <需求>` | `/skill-suggest <需求>` | **纯本地**路由:从已装 skill 推荐 Top 3 (markdown 表格 + "适合/不适合") |
 | `/skill安装 <编号或 owner/repo>` | `/skill-install <...>` | 装一个,装完自动介绍 |
-| `/skill列表` | `/skill-list` | 三段:🟢 普通 / 🟡 已定制 / ⚪ 被遮蔽,带编号 |
+| `/skill列表` | `/skill-list` | **v8 升级**:按 category 分 27 类展示,specificity+usage+name 三轴排序;`--cat 部署` 只看某类;`--flat`/`--brief`/`--full` |
 | `/skill <编号>` | `/skill <编号>` | 快捷:看第 n 个详情 |
 | `/skill详情 <编号或name>` | `/skill-info <...>` | 看来源/安装命令/版本状态/定制历史 |
 | `/skill修改 <name> <需求>` | `/skill-modify <name> <...>` | LLM 改源码,自动快照,显 diff,确认应用 |
 | `/skill回滚 <name>` | `/skill-rollback <name>` | 默认 swap previous;`--pristine` 强制回 GitHub 原版 |
 | `/skill卸载 <name>` | `/skill-uninstall <name>` | 删软链 + 搬 backups/ |
-| `/skill介绍 <name>` | `/skill-intro <name>` | 一段中文口语化使用说明 |
+| `/skill介绍 <name>` | `/skill-intro <name>` | 一段中文口语化使用说明 + 分类标签 + "何时别用" |
 | `/skill帮助` | `/skill-help` | 列所有 /skill* 命令 |
 | `/skill <任意词>` | `/skill <任意词>` | 通用入口 router,中间带空格也容错(如 `/skill 帮助`) |
+
+### 分类 + 多轴排序(v8)
+
+`skillforge list` 默认按 **27 个 category** 分段展示(🤖 Letta agent / 🖼 Figma / 🌊 GSAP/动效 / 🚀 部署平台 / 📓 Notion / 🛡 安全 / 🎬 视频音频 / 🖌 图像处理 / ...),每段内按以下三轴排序:
+
+1. **专用程度** (`skill_specificity`): description 含 "Use when..." +3 / 含 "Do not use for..." +3 / 触发词列表 +1~3 / name 含连字符 +1~3 / name 短而泛 -1
+2. **使用频次** (`usage_stats`): detail/intro/install 调过的 skill 累计 +1,持久到 `~/.skillforge/.usage_stats.json`
+3. **字典序**(平局兜底)
+
+借鉴 Codex 侧 skill-router profile 的"最窄可用能力优先"原则。
+
+### `/skill建议` vs `/skill查找` 区别
+
+- **`/skill建议 <需求>`** —— **纯本地**,从已装 74+ skill 里推 Top 3 (Markdown 表格,带"适合 / 不适合"列);**不**联网
+- **`/skill查找 <需求>`** —— 去 **GitHub 找新的**,LLM 三角度改写 → 多搜 → Scorecard/OSV 安全审 → Top 3
 
 ### 版本三槽位(v3)
 

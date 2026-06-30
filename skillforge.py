@@ -1111,6 +1111,19 @@ def render_top3(query: str, ranked: list, meta_by_name: dict, trusted_set: set) 
         lines.append(f"      推荐: {item.get('why','')}")
         risks = item.get("risks") or []
         lines.append(f"      风险: {'  '.join(risks) if risks else '(无)'}")
+        # v8: 适合/不适合(LLM 没生成时从 description 抠)
+        suit = item.get("suitable") or _extract_clause(
+            m.get("description",""),
+            [r"Use when ([^.。\n]+)", r"使用[场]?景[:: ]([^.。\n]+)"]
+        )
+        not_suit = item.get("not_suitable") or _extract_clause(
+            m.get("description",""),
+            [r"Do not use (?:for |when )([^.。\n]+)", r"don't use ([^.。\n]+)", r"不[适]?用[于:: ]([^.。\n]+)"]
+        )
+        if suit:
+            lines.append(f"      ✓ 适合: {suit[:90]}")
+        if not_suit:
+            lines.append(f"      ✗ 别用: {not_suit[:90]}")
         lines.append(f"      装: {install_str}     owner ∈ trusted? {trusted}\n")
     return "\n".join(lines)
 
@@ -1294,6 +1307,190 @@ def confirm(prompt, assume_yes=False):
 
 # ----------------------------------------------------------------------------- 命令
 CATALOG_FILE = os.environ.get("SKILLFORGE_CATALOG", "~/.skillforge/CATALOG.md")
+CATEGORIES_CACHE = os.environ.get("SKILLFORGE_CATEGORIES", "~/.skillforge/.categories.json")
+USAGE_STATS_FILE = os.environ.get("SKILLFORGE_USAGE", "~/.skillforge/.usage_stats.json")
+
+# 分类规则:keyword → category。匹配 description + name 的小写文本。
+# 第一个命中的优先 → 把"专用程度强、特征词独占"的类放前面,"宽词" 类放后面。
+# 经实测调过几轮(对当前 74 个 skill 命中正确率高)。"其它"兜底。
+_CATEGORY_RULES = [
+    # 顺序原则:特征独占的强匹配在前,泛词类在后
+    # 1) Letta 系列(8+ 个独立 skill)
+    ("🤖 Letta agent",  ["letta"]),
+    # 2) GSAP(只看 gsap 前缀,不被泛 animation 抢)
+    ("🌊 GSAP/动效",     ["gsap-", "scrolltrigger", "framework-agnostic animation", "gsap.to(", "gsap.timeline"]),
+    # 3) Figma 系列
+    ("🖼 Figma",         ["figma"]),
+    # 4) Notion(严:必须 notion- 前缀,避免被 markitdown 等 "import to notion" 抢)
+    ("📓 Notion",        ["notion-"]),
+    # 5) 路由/智能(本工具自身,放前面避免被 "skill"/"agent" 通配抢)
+    ("🧭 路由/智能",     ["skillforge", "skill-creator", "anthropic-skill", "dispatch", "subagent", "superpowers", "brainstorm", "writing-plan", "writing-skill"]),
+    # 6) GitHub PR/CI 单独
+    ("🐙 GitHub PR/CI",  ["gh-address", "gh-fix-ci", " yeet ", "yeet:", "github pull request", "github ci", "github actions", "open a pull request"]),
+    # 7) 前端审美(放在浏览器前,impeccable 应归审美而非浏览器)
+    ("✨ 前端审美",      ["impeccable", "anti-slop", "taste-skill", "redesign-existing", "ui-ux-pro", "premium quality", "design-taste"]),
+    # 8) 浏览器自动化
+    ("🌐 浏览器",        ["browser ", "playwright", "claude in chrome", "chrome devtools", "puppeteer", "selenium"]),
+    # 9) 排版/Typesetting — 放在 PPT 前,kami 不该归 PPT
+    ("🎨 排版/Typeset",  ["kami", "typesetting", "one-pager", "白皮书", "landing page typography", "marp"]),
+    # 10) 图像处理 — 放在视频音频前,asset-forge 主要是 image(虽然能转 webm)
+    ("🖌 图像处理",      ["rembg", "asset-forge", "pixel2motion", "asset optimization", "background remov", "image background", "logo design", "raster", "imagegen", "spritesheet", "去背景", "hatch-pet"]),
+    # 11) 视频音频
+    ("🎬 视频音频",      ["transcribe", " tts ", "voiceover", "subtitle", "webm video", "video translation", "video composition", "audio file", "speech ", "音频", "视频翻译", "extract text from recording", "extract text from audio"]),
+    # 12) 数据格式转换 — 放在 PPT/Word/Excel 前
+    ("📦 数据转换",      ["markitdown", "convert files", "convert pdf", "rag ingestion", "to markdown", "doc to markdown"]),
+    # 13) 截图(独立小类)
+    ("🖼 截图",          ["screenshot"]),
+    # 14) PPT 显式格式
+    ("📊 PPT/幻灯",      ["pptx", "powerpoint", "knight-imagetopptx", "幻灯", "slide deck"]),
+    # 15) PDF 显式格式
+    ("📋 PDF",           ["pdf"]),
+    # 16) Word 显式 docx
+    ("📝 Word/DOCX",     ["docx", "word doc"]),
+    # 17) Excel/表格 显式
+    ("📈 表格",          ["xlsx", "csv ", "excel", "spreadsheet"]),
+    # 18) 前端实现
+    ("🎨 前端实现",     ["frontend-design", "implement design", "ui code", "production-grade", "tailwind", "create distinctive frontend"]),
+    # 19) 部署平台
+    ("🚀 部署平台",     ["vercel", "netlify", "cloudflare", "render-deploy", "deploy a", "deploy to "]),
+    # 20) 迁移/扩展(放在 MCP 前 — migrate-to-codex 不该归 MCP)
+    ("🔄 迁移/扩展",    ["enable-1m", "migrate-to-codex", "1m context"]),
+    # 21) Session 管理(my-compact / codex-sessions)
+    ("💾 Session 管理", ["codex-sessions", "my-compact", "my-auto-compact", "session compact"]),
+    # 22) MCP/插件
+    ("🔌 MCP/插件",     ["build-mcp", " mcp ", "model context protocol", "chatgpt apps sdk", "chatgpt-apps"]),
+    # 23) 安全
+    ("🛡 安全",         ["security-", "threat model", "ownership", "sentry", "vulnerab", "scorecard"]),
+    # 24) 写作/Essay
+    ("✍ 写作",         ["essay", "blog writ", "writing-helper", "ai writing"]),
+    # 25) 绘图/可视化
+    ("📐 绘图",         ["drawio", "diagram", "flowchart", "uml-mcp"]),
+    # 26) Jupyter/数据科学
+    ("🐍 Jupyter",      ["jupyter", "notebook"]),
+    # 27) SDK 文档
+    ("📚 SDK 文档",     ["openai-docs", "claude-api", "anthropic api"]),
+    # 28) issue tracker
+    ("📋 issue 管理",   ["linear", "jira", "issue tracker"]),
+    # 29) CLI 工具创建
+    ("🖥 CLI 工具",     ["cli-creator", "command-line tool", "winui", "aspnet"]),
+    # 30) 配置类
+    ("🔧 配置",         ["compaction-prompt", "configure llm", "configure model"]),
+    # 31) 目标/任务
+    ("🎯 目标/计划",    ["define-goal", "set objective"]),
+    # 32) Karpathy 行为指南
+    ("📖 行为指南",     ["karpathy", "behavioral guideline"]),
+    # 33) ChatGPT 历史导航(navigating-chatgpt-history)
+    ("📜 ChatGPT 历史", ["navigating-chatgpt", "chatgpt history", "chatgpt conversation"]),
+]
+
+
+def _category_for_text(text: str) -> str:
+    """关键词命中第一个 category。'其它' 兜底。"""
+    if not text:
+        return "📦 其它"
+    t = text.lower()
+    for cat, kws in _CATEGORY_RULES:
+        for kw in kws:
+            if kw in t:
+                return cat
+    return "📦 其它"
+
+
+def categorize_skill(meta: dict) -> str:
+    """根据 SKILL.md frontmatter(name + description) 推断分类。"""
+    text = (meta.get("name", "") + " " + (meta.get("description") or "")).strip()
+    return _category_for_text(text)
+
+
+def _categories_cache_load() -> dict:
+    p = Path(CATEGORIES_CACHE).expanduser()
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _categories_cache_save(d: dict):
+    p = Path(CATEGORIES_CACHE).expanduser()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def skill_category(name: str, meta: dict) -> str:
+    """带缓存的分类查询。SKILL.md description 改后自动失效(用 sha 校验)。"""
+    import hashlib
+    cache = _categories_cache_load()
+    sig = hashlib.md5(((meta.get("description") or "") + name).encode("utf-8")).hexdigest()[:12]
+    entry = cache.get(name)
+    if entry and entry.get("sig") == sig:
+        return entry["category"]
+    cat = categorize_skill(meta)
+    cache[name] = {"sig": sig, "category": cat}
+    _categories_cache_save(cache)
+    return cat
+
+
+# ----------------------------------------------------------------------------- 多轴排序 + 使用频次
+def skill_specificity(meta: dict) -> int:
+    """专用程度评分:越高越"窄"。spec §reference profile §57-72 排序模型借鉴。
+    - 含 "Use when" / "Only use" 段 = 边界明确
+    - 含 "Do not use" / "Prefer X" = 反例边界明确
+    - description 含触发词列表(顿号/分号分隔多项)
+    - name 包含连字符(子项,通常更专用)
+    """
+    desc = (meta.get("description") or "")
+    name = meta.get("name", "")
+    score = 0
+    if re.search(r"(?i)use when|use this skill when|trigger when|only use", desc):
+        score += 3
+    if re.search(r"(?i)do not use|don't use|prefer .+ skill|use .+ instead", desc):
+        score += 3
+    if re.search(r"触发[:: ]", desc) or re.search(r"trigger[s]?[:: ]", desc, re.I):
+        score += 2
+    # 触发词数量(顿号/分号分隔)
+    trig_m = re.search(r"(?:触发|trigger[s]?)[:: ]([^.。\n]+)", desc, re.I)
+    if trig_m:
+        n = len(re.split(r"[,、,;；]", trig_m.group(1)))
+        score += min(n, 3)
+    # name 越长越具体
+    if "-" in name:
+        score += min(name.count("-"), 3)
+    # 名字短而泛的通常更通用,扣点
+    if len(name) < 6 and "-" not in name:
+        score -= 1
+    return score
+
+
+def _usage_load() -> dict:
+    p = Path(USAGE_STATS_FILE).expanduser()
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _usage_save(d: dict):
+    p = Path(USAGE_STATS_FILE).expanduser()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+
+
+def usage_bump(name: str):
+    """detail/intro/install 调用时 +1,作为 list/suggest 的历史偏好信号。"""
+    d = _usage_load()
+    d[name] = (d.get(name) or 0) + 1
+    _usage_save(d)
+
+
+def usage_count(name: str) -> int:
+    return (_usage_load().get(name) or 0)
+
+
+
 
 
 def generate_catalog(out_path=None) -> Path:
@@ -1390,6 +1587,15 @@ def _is_customized(name: str) -> bool:
     return "✨" in (meta.get("description") or "")
 
 
+def _sort_by_priority(skills: list) -> list:
+    """同段内排序:specificity(专用度) > usage(使用频次) > name 字典序。"""
+    return sorted(skills, key=lambda s: (
+        -skill_specificity({"name": s.name, "description": s.description}),
+        -usage_count(s.name),
+        s.name.lower(),
+    ))
+
+
 def cmd_list(args):
     import textwrap as _tw
     skills, shadowed = scan_local()
@@ -1402,60 +1608,102 @@ def cmd_list(args):
     for s in skills:
         (custom if _is_customized(s.name) else regular).append(s)
 
-    def _print_desc(desc: str, brief: bool):
+    # 给 regular 按 category 分组
+    from collections import defaultdict
+    by_cat = defaultdict(list)
+    for s in regular:
+        cat = skill_category(s.name, {"name": s.name, "description": s.description})
+        by_cat[cat].append(s)
+    # 段内按 specificity / usage / name 排
+    for cat in by_cat:
+        by_cat[cat] = _sort_by_priority(by_cat[cat])
+
+    def _print_desc(desc: str, mode: str):
         if not desc:
             return
-        if brief:
-            print(f"        {desc[:88]}")
-        else:
-            # 完整描述,折行到 72 字符宽,8 空格缩进
+        if mode == "brief":
+            print(f"        {desc[:120]}")
+        elif mode == "tight":
+            # 紧凑:取首句(去触发段),最多 80 字
+            first = re.split(r"[。.]\s*", desc, maxsplit=1)[0]
+            if "触发" in first:
+                first = re.split(r"\s*触发", first, maxsplit=1)[0]
+            short = (first.strip() or desc)[:80]
+            print(f"        {short}")
+        else:  # full
             wrapped = _tw.fill(desc, width=72,
                                initial_indent="        ",
                                subsequent_indent="        ")
             print(wrapped)
 
-    # 统一编号:先 regular,再 custom,再 shadow
+    desc_mode = "full" if args.full else ("brief" if args.brief else "tight")
+
     mapping = {}
     n = 1
-    print(f"🟢 已装技能(普通)  {len(regular)} 个\n")
-    for s in regular:
-        mapping[n] = s.name
-        print(f"  [{n:>3}] {s.name}")
-        _print_desc(s.description, brief=args.brief)
-        n += 1
+    total_reg = len(regular)
+    total_cat = len(by_cat)
+
+    # ---- 输出:分类分段 / --flat 字母序 ----
+    if args.flat:
+        print(f"🟢 已装技能  {total_reg} 个(字母序)\n")
+        for s in sorted(regular, key=lambda x: x.name.lower()):
+            mapping[n] = s.name
+            print(f"  [{n:>3}] {s.name}")
+            _print_desc(s.description, desc_mode)
+            n += 1
+    else:
+        print(f"🟢 已装技能  {total_reg} 个,分 {total_cat} 类:\n")
+        # 段排序:成员数多的在前
+        for cat in sorted(by_cat, key=lambda c: (-len(by_cat[c]), c)):
+            members = by_cat[cat]
+            if args.cat and args.cat.lower() not in cat.lower():
+                continue
+            print(f"━━━ {cat}  ({len(members)}) ━━━")
+            for s in members:
+                mapping[n] = s.name
+                print(f"  [{n:>3}] {s.name}")
+                _print_desc(s.description, desc_mode)
+                n += 1
+            print()
+
     if custom:
-        print(f"\n🟡 已定制(改过源码)  {len(custom)} 个")
-        for s in custom:
+        print(f"━━━ 🟡 已定制(改过源码)  ({len(custom)}) ━━━")
+        for s in _sort_by_priority(custom):
             mapping[n] = s.name
             print(f"  [{n:>3}] ✨ {s.name}")
             if s.description:
                 d = s.description.lstrip("✨").lstrip("[已定制]").lstrip().lstrip(":").lstrip()
-                _print_desc(d, brief=args.brief)
+                _print_desc(d, desc_mode)
             n += 1
+        print()
+
     if shadowed:
-        print(f"\n⚪ 被遮蔽副本  {len(shadowed)} 个(同名时优先 SKILLFORGE_HOME > 用户级)")
+        print(f"━━━ ⚪ 被遮蔽副本  ({len(shadowed)}) ━━━")
         for s in shadowed:
             print(f"  ✕ {s.name}   {s.path}")
-        print("  可以合并到 SKILLFORGE_HOME 后用软链统一,或删除冗余副本。")
+        print("  可 `skillforge consolidate` 合并到 SKILLFORGE_HOME 后用软链统一。")
+        print()
 
     save_last_list(mapping)
 
-    # 顺手刷新 CATALOG.md(把全部完整描述写盘,便于离线 / 别处查)
+    # 顺手刷新 CATALOG.md
     try:
-        cat = generate_catalog()
-        print(f"\n📜 完整目录(完整描述 + 版本状态)已写到: {cat}")
+        cat_path = generate_catalog()
+        print(f"📜 完整目录已自动写到 {cat_path}")
     except Exception as e:
-        print(f"\n[warn] 生成 CATALOG.md 失败: {e}", file=sys.stderr)
-    print(f"   后续 `skillforge detail <编号>` 看单个详情,`skillforge install <编号|owner/repo>` 装。")
+        print(f"[warn] 生成 CATALOG.md 失败: {e}", file=sys.stderr)
+    print(f"💡 提示:")
+    print(f"   `skillforge list --full` 完整描述折行  `--brief` 紧凑 88 字")
+    print(f"   `skillforge list --cat 部署` 只看某类  `--flat` 字母序")
+    print(f"   `skillforge detail <编号>` 看详情  `skillforge install <编号|owner/repo>` 装")
 
     if args.json:
-        print("\n" + json.dumps(
-            {"regular": [asdict(s) for s in regular],
-             "custom": [asdict(s) for s in custom],
-             "shadowed": [asdict(s) for s in shadowed],
-             "numbering": {str(k): v for k, v in mapping.items()}},
-            ensure_ascii=False, indent=2,
-        ))
+        print("\n" + json.dumps({
+            "regular_by_cat": {cat: [asdict(s) for s in members] for cat, members in by_cat.items()},
+            "custom": [asdict(s) for s in custom],
+            "shadowed": [asdict(s) for s in shadowed],
+            "numbering": {str(k): v for k, v in mapping.items()},
+        }, ensure_ascii=False, indent=2))
 
 
 def cmd_which(args):
@@ -1728,6 +1976,94 @@ def cmd_rollback(args):
     # 如果想精确反映,需要 reparse + 改 frontmatter,这里 KISS。
 
 
+def cmd_suggest(args):
+    """/skill建议:纯本地路由 — 输入自然语言,在已装 skill 里挑 Top 3 推荐(不去 GitHub)。
+    输出 Markdown 表格,带"适合场景/不适合场景"两列(借鉴 Codex profile 排序模型)。
+    """
+    query = " ".join(args.query).strip()
+    if not query:
+        print("用法: skillforge suggest <自然语言需求>", file=sys.stderr)
+        sys.exit(2)
+
+    skills, _ = scan_local()
+    if not skills:
+        print("(本地没有任何已装 skill)")
+        return
+
+    # 1) 先按 match_local 拿命中(关键词加权;有 LLM 走 LLM)
+    matches = match_local(query, skills, threshold=0.0)  # 不卡阈值,要全部排序
+
+    # 2) 没命中或匹配度都很低 → 按 category 关键词匹配回退
+    has_cjk = any("一" <= ch <= "鿿" for ch in query)
+    if not matches or (matches and matches[0][1] < 0.3):
+        # 关键词法 0 命中,再按 category 名字模糊撞
+        ql = query.lower()
+        cat_hits = []
+        for s in skills:
+            cat = skill_category(s.name, {"name": s.name, "description": s.description})
+            # 中文 query 命中 emoji+中文 cat 名;英文 query 命中 cat 名
+            if any(part in cat or part in s.name.lower() for part in ql.split() if len(part) >= 2):
+                cat_hits.append((s, 0.5))
+        if cat_hits:
+            matches = cat_hits[:10]
+
+    # 3) 把 specificity / usage 一起合权重排
+    scored = []
+    for s, base in matches[:20]:
+        meta = {"name": s.name, "description": s.description}
+        spec = skill_specificity(meta) / 12  # 归一化 (0-12 范围)
+        usage = min(1.0, usage_count(s.name) / 5)  # 5+ 次封顶
+        composite = 0.55 * base + 0.30 * spec + 0.15 * usage
+        scored.append((s, composite, base, spec, usage))
+    scored.sort(key=lambda x: -x[1])
+    top = scored[:3]
+
+    # 真没命中:top 1 的 base 关键词分都 < 0.15,直接告诉用户,别硬凑 Top 3
+    # (composite 因为 specificity 加权,即使关键词 0 命中也可能 0.3,所以不能用 composite 判)
+    if not top or top[0][2] < 0.15:
+        print(f"\n🎯 「{query}」 → 本地没匹配的 skill。\n")
+        if has_cjk and not os.environ.get("ANTHROPIC_API_KEY"):
+            print("   ⚠️ 中文 query + 无 ANTHROPIC_API_KEY → 关键词法必败")
+            print("   先试英文 query,或 export ANTHROPIC_API_KEY 后让 LLM 做语义匹配")
+        print(f'   去 GitHub 找新的:`skillforge find "{query}"`')
+        # 仍可选展示分类菜单(供用户漫游)
+        if not args.no_browse:
+            print(f"\n   或浏览已装的分类:`skillforge list`(74 个分 27 类)")
+        return
+
+    print(f"\n🎯 「{query}」 → 本地 Top {len(top)} (没去 GitHub,只看已装)\n")
+
+    # 4) 输出表格(借鉴 Codex profile 推荐排序输出格式)
+    print("| Rank | Skill | 推荐级别 | 匹配度 | 适合场景 | 不适合场景 |")
+    print("|------|-------|----------|--------|----------|------------|")
+    for i, (s, composite, base, spec, usage) in enumerate(top, 1):
+        cat = skill_category(s.name, {"name": s.name, "description": s.description})
+        # 推荐级别:0.7+ 强推,0.5+ 推荐,0.3+ 谨慎,余下 仅参考
+        if composite >= 0.7: level = "强推"
+        elif composite >= 0.5: level = "推荐"
+        elif composite >= 0.3: level = "谨慎"
+        else: level = "参考"
+        # 从 description 抠"Use when..." 段
+        suit = _extract_clause(s.description, [r"Use when ([^.。\n]+)", r"使用[场]?景[:: ]([^.。\n]+)"])
+        not_suit = _extract_clause(s.description, [r"Do not use (?:for |when )([^.。\n]+)", r"don't use ([^.。\n]+)", r"不[适]?用[于:: ]([^.。\n]+)"])
+        print(f"| {i} | **{s.name}** ({cat}) | {level} | base={base:.2f} spec={spec:.2f} usage={usage:.2f} → **{composite:.2f}** | {suit or '(看描述)'} | {not_suit or '(无明确反例)'} |")
+
+    print(f"\n💡 用法:`skillforge detail {top[0][0].name}` 看详情 / `skillforge intro {top[0][0].name}` 看简介")
+    print(f"   都不合适?去 GitHub 找:`skillforge find \"{query}\"`")
+
+
+def _extract_clause(desc: str, patterns: list) -> str:
+    """从 description 抠出符合 pattern 的子句(短句)。返回 None 如果都不命中。"""
+    if not desc:
+        return None
+    for p in patterns:
+        m = re.search(p, desc, re.IGNORECASE)
+        if m:
+            s = m.group(1).strip().rstrip(",.;:。、")
+            return s[:80]  # 限长
+    return None
+
+
 def cmd_uninstall(args):
     name = resolve_skill(args.target) if args.target else None
     if not name:
@@ -1947,6 +2283,7 @@ def cmd_self_install(args):
         "skill卸载.md": "skill-uninstall.md",
         "skill介绍.md": "skill-intro.md",
         "skill帮助.md": "skill-help.md",
+        "skill建议.md": "skill-suggest.md",
     }
     print(f"\n📂 准备 {len(templates)} 个 slash 模板 + 各自的 ASCII 别名:")
     for t in templates:
@@ -2297,6 +2634,14 @@ def cmd_install(args):
     print(f"调用例子: 跟 agent 说\"用 {name} 帮我 ...\" 自动触发,或用 /skill介绍 {name} 看简介。")
 
 
+def _specificity_label(meta: dict) -> str:
+    """根据 specificity 给 skill 贴标签:专用 / 通用 / 极泛。"""
+    score = skill_specificity(meta)
+    if score >= 8: return "🎯 专用 (边界明确)"
+    if score >= 4: return "⚙️ 中等专用"
+    return "📦 通用 (适用面广,触发不强)"
+
+
 def _template_intro(meta: dict, body: str) -> str:
     """无 LLM 的模板版 intro。提取 description + 第一个 install 命令 + 触发词。
     手写 / 英文 description 没有标准"触发:" / ```bash 块时,改用 description 前 200 字+
@@ -2329,7 +2674,14 @@ def _template_intro(meta: dict, body: str) -> str:
         first_sent = re.split(r"\s*触发", first_sent, maxsplit=1)[0]
     desc_short = (first_sent.strip() or desc[:160]).rstrip("。.") + "。"
 
-    lines = [f"✨ **{name}** 装好了", ""]
+    cat = skill_category(name, meta)
+    spec_label = _specificity_label(meta)
+    not_for = _extract_clause(desc, [r"Do not use (?:for |when )([^.。\n]+)",
+                                      r"don't use ([^.。\n]+)",
+                                      r"不[适]?用[于:: ]([^.。\n]+)",
+                                      r"Prefer .+ skill .* for ([^.。\n]+)"])
+
+    lines = [f"✨ **{name}** 装好了  ·  {cat}  ·  {spec_label}", ""]
     lines.append(f"**做什么**:{desc_short}")
     lines.append("")
     if triggers:
@@ -2337,6 +2689,9 @@ def _template_intro(meta: dict, body: str) -> str:
     else:
         lines.append(f"**怎么触发**:跟 agent 说\"用 {name} 帮我 ...\",或描述任何 {name} 能解决的具体场景")
     lines.append("")
+    if not_for:
+        lines.append(f"**何时别用**:{not_for[:120]}")
+        lines.append("")
     if install:
         lines.append(f"**装法**(已经替你装好了,这是参考):`{install}`")
     else:
@@ -2415,6 +2770,7 @@ def cmd_detail(args):
     print(f"     current (在用):          ✓")
     print(f"\n📝 描述:\n{desc_text or '(无)'}\n")
     print(f"调用例子: 跟 agent 说\"用 {name} ...\" 即可触发,或 `skillforge intro {name}` 看简介。")
+    usage_bump(name)  # v8: 记录用户对这个 skill 的关注度
 
 
 def cmd_intro(args):
@@ -2437,6 +2793,7 @@ def cmd_intro(args):
     if not text:
         text = _template_intro(meta, body)
     print(text)
+    usage_bump(name)  # v8: 关注度+1
 
 
 def cmd_consolidate(args):
@@ -2886,9 +3243,12 @@ def build_parser():
     p = argparse.ArgumentParser(prog="skillforge", description="跨 agent 技能闭环管理")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    pl = sub.add_parser("list", help="列出已装技能(跨 agent 去重)")
+    pl = sub.add_parser("list", help="列出已装技能(默认按 category 分段,specificity+usage+name 三轴排序)")
     pl.add_argument("--json", action="store_true")
-    pl.add_argument("--brief", action="store_true", help="只显示前 88 字符 description(传统紧凑模式)")
+    pl.add_argument("--brief", action="store_true", help="每条 120 字符简介(防输出过大)")
+    pl.add_argument("--full", action="store_true", help="每条完整 description 折行(适合细看)")
+    pl.add_argument("--flat", action="store_true", help="不分类,纯字母序")
+    pl.add_argument("--cat", help="只看某分类(如 --cat 部署,模糊匹配)")
     pl.set_defaults(func=cmd_list)
 
     pcat = sub.add_parser("catalog", help="手动重生成 ~/.skillforge/CATALOG.md")
@@ -2898,6 +3258,11 @@ def build_parser():
     pw = sub.add_parser("which", help="查本地有没有能满足需求的技能")
     pw.add_argument("query", nargs="+")
     pw.set_defaults(func=cmd_which)
+
+    psg = sub.add_parser("suggest", help="自然语言路由 → 本地 Top 3 (markdown 表格,带'适合/不适合')")
+    psg.add_argument("query", nargs="+")
+    psg.add_argument("--no-browse", action="store_true", help="0 命中时不显示分类菜单提示")
+    psg.set_defaults(func=cmd_suggest)
 
     pf = sub.add_parser("find", help="本地没有就去 GitHub 找并安装(LLM 增强,见 specs)")
     pf.add_argument("query", nargs="+")
