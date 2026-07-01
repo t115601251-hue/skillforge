@@ -1,0 +1,16 @@
+{
+  "project": "skillforge",
+  "purpose": "GitHub README visual assets for Claude project ingestion",
+  "asset_directory": "assets/readme",
+  "assets": [
+    "01-hero.png",
+    "02-workflow.png",
+    "03-core-scenarios.png",
+    "04-commands.png",
+    "05-mece-categories.png",
+    "06-security.png",
+    "07-github-insert-guide.png"
+  ],
+  "recommended_usage": "Use relative paths in README.md, e.g. assets/readme/01-hero.png",
+  "notes": "Do not base64 embed images. Keep original README text and insert images in matching sections."
+}
