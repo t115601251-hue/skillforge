@@ -1511,68 +1511,61 @@ def generate_catalog(out_path=None) -> Path:
     lines = [
         "# SkillForge 本地技能目录",
         "",
-        f"> 自动生成于 {now} —— **不要手工编辑**,任何 skillforge install/uninstall/modify 操作都会覆盖。",
+        f"> 自动生成于 {now} · 74+ 个已装 skill 按 27 类分段 · **不要手工编辑**(每次 install/uninstall/modify 都会重写)",
         "",
-        f"- 🟢 普通已装: **{len(regular)}** 个",
-        f"- 🟡 已定制(改过源码): **{len(custom)}** 个",
-        f"- ⚪ 被遮蔽副本: **{len(shadowed)}** 个",
-        f"- 合计活跃 skill: **{len(skills)}** 个",
+        f"🟢 普通 **{len(regular)}** · 🟡 已定制 **{len(custom)}** · ⚪ 被遮蔽 **{len(shadowed)}** · 合计 **{len(skills)}**",
         "",
-        "## 目录",
+        "---",
         "",
     ]
-    if regular:
-        lines.append("### 🟢 普通已装")
-        for s in sorted(regular, key=lambda x: x.name.lower()):
-            lines.append(f"- [{s.name}](#{s.name.lower().replace(' ','-')})")
-        lines.append("")
-    if custom:
-        lines.append("### 🟡 已定制")
-        for s in sorted(custom, key=lambda x: x.name.lower()):
-            lines.append(f"- [✨ {s.name}](#-{s.name.lower().replace(' ','-')})")
-        lines.append("")
-    if shadowed:
-        lines.append("### ⚪ 被遮蔽")
-        for s in shadowed:
-            lines.append(f"- ✕ {s.name} — {s.path}")
-        lines.append("")
-    lines.append("---")
-    lines.append("")
+
+    # 按 category 分组
+    from collections import defaultdict
+    by_cat = defaultdict(list)
+    for s in regular:
+        cat = skill_category(s.name, {"name": s.name, "description": s.description})
+        by_cat[cat].append(s)
 
     def _render_one(s, customized=False):
-        ver_root = Path(SKILLFORGE_VERSIONS).expanduser() / s.name
-        has_pristine = (ver_root / "pristine").exists()
-        has_previous = (ver_root / "previous").exists()
-        ver_str = "  · ".join(filter(None, [
-            "🟢 pristine" if has_pristine else None,
-            "🟡 previous" if has_previous else None,
-            "🔵 current",
-        ]))
         marker = "✨ " if customized else ""
+        ver_root = Path(SKILLFORGE_VERSIONS).expanduser() / s.name
+        version_bits = []
+        if (ver_root / "pristine").exists(): version_bits.append("🟢")
+        if (ver_root / "previous").exists(): version_bits.append("🟡")
+        version_bits.append("🔵")
+        ver_short = "".join(version_bits)
+        # 单行 skill 头 + 分段引用 description
         return [
-            f"### {marker}{s.name}",
+            f"#### {marker}{s.name}  <sub>{ver_short}</sub>",
             "",
-            f"**Description**:",
-            "",
-            f"> {s.description or '(无)'}",
-            "",
-            f"- **位置**: `{s.path}`",
-            f"- **版本快照**: {ver_str}",
-            "",
-            "---",
+            f"{s.description or '_(无描述)_'}",
             "",
         ]
 
-    if regular:
-        lines.append("## 🟢 普通已装(完整描述)")
+    # 分类分段(段内按 specificity+usage+name 排,和 list 命令一致)
+    for cat in sorted(by_cat, key=lambda c: (-len(by_cat[c]), c)):
+        members = _sort_by_priority(by_cat[cat])
+        lines.append(f"## {cat}  ({len(members)})")
         lines.append("")
-        for s in sorted(regular, key=lambda x: x.name.lower()):
+        for s in members:
             lines.extend(_render_one(s, customized=False))
-    if custom:
-        lines.append("## 🟡 已定制(完整描述)")
+        lines.append("---")
         lines.append("")
-        for s in sorted(custom, key=lambda x: x.name.lower()):
+
+    if custom:
+        lines.append(f"## 🟡 已定制(改过源码)  ({len(custom)})")
+        lines.append("")
+        for s in _sort_by_priority(custom):
             lines.extend(_render_one(s, customized=True))
+        lines.append("---")
+        lines.append("")
+
+    if shadowed:
+        lines.append(f"## ⚪ 被遮蔽副本  ({len(shadowed)})")
+        lines.append("")
+        for s in shadowed:
+            lines.append(f"- ✕ **{s.name}** — `{s.path}`")
+        lines.append("")
 
     out.write_text("\n".join(lines), encoding="utf-8")
     return out
