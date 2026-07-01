@@ -2575,7 +2575,7 @@ def _skillforge_own_skill_md(skillforge_path: str) -> str:
     """skillforge 自己的 SKILL.md frontmatter description 写成"自然语言触发型"。"""
     return f"""---
 name: skillforge
-description: 跨 agent 技能闭环管理(查找/安装/列表/详情/修改/回滚/卸载/介绍)。触发:用户说"找一个/装一个/查一下/改一改/卸载.../查看 ... 的 skill / 技能 / 工具"。也通过 /skill-查找 /skill-列表 /skill 等 slash command 调用。
+description: 跨 agent 技能闭环管理(查找/安装/列表/详情/修改/回滚/卸载/介绍/建议)。触发:用户说"找一个/装一个/查一下/改一改/卸载.../查看 ... 的 skill / 技能 / 工具",或输入以 `/skill-` 或 `-skill` 开头的文本(如 `-skill列表`、`-skill查找 xxx`)。
 ---
 
 # skillforge
@@ -2597,17 +2597,34 @@ python {skillforge_path} <subcommand> [...]
 
 ## 怎么用
 
-详见 `python {skillforge_path} help`(列出所有 subcommand)和对应 slash command 模板:
-- /skill-查找 <需求>
-- /skill-安装 <编号|owner/repo>
-- /skill-列表
-- /skill-详情 <编号>
-- /skill-详情 <编号|name>
-- /skill-修改 <编号|name> <需求>
-- /skill-回滚 <name> [--pristine]
-- /skill-卸载 <name>
-- /skill-介绍 <name>
-- /skill-帮助
+详见 `python {skillforge_path} help`(列出所有 subcommand)。**三种入口都能触发同一套流程**:
+
+| slash command (原生) | ASCII 别名 | 文本前缀(v9.3.2) | 语义 |
+|---|---|---|---|
+| /skill-查找 <需求> | /skill-find | `-skill查找 <需求>` | 去 GitHub 找 Top 3 |
+| /skill-建议 <需求> | /skill-suggest | `-skill建议 <需求>` | 从已装里 Top 3(不联网) |
+| /skill-列表 | /skill-list | `-skill列表` | MECE 5+1 紧凑目录 |
+| /skill-详情 <编号\|name> | /skill-info | `-skill详情 <编号>` | 看某项详情 |
+| /skill-安装 <target> | /skill-install | `-skill安装 <target>` | 装一个 |
+| /skill-修改 <name> <需求> | /skill-modify | `-skill修改 <name> <需求>` | 改源码 |
+| /skill-回滚 <name> | /skill-rollback | `-skill回滚 <name>` | 回上一版 |
+| /skill-卸载 <name> | /skill-uninstall | `-skill卸载 <name>` | 卸载 |
+| /skill-介绍 <name> | /skill-intro | `-skill介绍 <name>` | 出一段简介 |
+| /skill-帮助 | /skill-help | `-skill帮助` | 命令表 |
+
+## 文本前缀路由(重要,v9.3.2 新)
+
+用户输入**以 `-skill` 开头的整行文本**时(不是 slash command,是普通消息),你要主动识别并路由到对应流程:
+
+- 匹配规则:行首 `-skill` + 中文动词(查找/列表/详情/安装/修改/回滚/卸载/介绍/建议/帮助) + 空格 + 剩余参数
+- 触发后:直接执行对应 slash 模板(`~/.claude/commands/skill-<动词>.md` 或本仓库 `slash_templates/skill-<动词>.md`)的完整流程,**不要再回问一遍**
+- 示例:
+  - 用户敲 `-skill列表` → 走 /skill-列表 流程
+  - 用户敲 `-skill查找 能写作文的工具` → 走 /skill-查找 "能写作文的工具" 流程
+  - 用户敲 `-skill详情 31` → 走 /skill-详情 31 流程
+- 兜底:开头是 `-skill` 但动词不在表里 → 当作 `-skill查找 <剩余>` 处理
+
+**为什么有两套**:`/` 是 Claude Code / Codex / OpenClaw 硬编码的 slash 前缀,`-` 是用户偏好的更"不冲突"的敲法。两种都保留,用户想敲哪种就哪种。
 
 ## 关键设计
 
