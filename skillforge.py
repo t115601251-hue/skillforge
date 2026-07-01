@@ -3486,7 +3486,8 @@ def cmd_detail(args):
 
 
 def cmd_intro(args):
-    name = args.name
+    # v9.7.1: 接受编号(通过 .last_list.json resolve)或 name
+    name = resolve_skill(args.name) or args.name
     skill_dir = Path(CANONICAL_HOME).expanduser() / name
     md = skill_dir / "SKILL.md"
     if not md.exists():
