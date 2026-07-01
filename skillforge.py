@@ -1921,8 +1921,8 @@ def generate_catalog(out_path=None, brief=None) -> Path:
         lines.append("")
 
     # 尾注:告诉用户/后续 agent 编号从这里来
-    tail_zh = f"\n> 💡 共 **{idx-1}** 项。用 `/skill-详情 <编号>` 或 `/skill-详情 <编号>` 直接看某项详情;编号与 CATALOG 显示顺序一致,30 天有效。"
-    tail_en = f"\n> 💡 Total **{idx-1}** items. Use `/skill <n>` or `/skill-详情 <n>` to inspect any item; numbers match CATALOG order, valid for 30 days."
+    tail_zh = f"\n> 💡 共 **{idx-1}** 项。用 `/skill-详情 <编号>` 或 `/skill-info <编号>` 直接看某项详情;编号与 CATALOG 显示顺序一致,30 天有效。"
+    tail_en = f"\n> 💡 Total **{idx-1}** items. Use `/skill-info <n>` or `/skill-详情 <n>` to inspect any item; numbers match CATALOG order, valid for 30 days."
     lines.append(tail_zh if lang == "zh" else tail_en)
 
     out.write_text("\n".join(lines), encoding="utf-8")

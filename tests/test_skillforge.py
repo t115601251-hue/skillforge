@@ -689,8 +689,8 @@ class TestBrief(unittest.TestCase):
             self.assertIn("数据契约", content)
             # 一行式条目格式(v9.2 加编号前缀)
             self.assertRegex(content, r"- `\s*\d+\.` \*\*\S+\*\* <sub>[🟢🟡🔵]+</sub> — ")
-            # 尾注含总数 + 编号提示
-            self.assertRegex(content, r"用 `/skill <编号>`|Use `/skill <n>`")
+            # 尾注含总数 + 编号提示 (v9.3: 命令名带 -)
+            self.assertRegex(content, r"/skill-详情 <编号>|/skill-info <n>")
             # 不能出现原描述典型长文本(检 markitdown 的英文长句)
             self.assertNotIn("Convert files and URLs into clean Markdown for LLM ingestion", content)
 
