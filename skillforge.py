@@ -47,6 +47,52 @@ BACKUP_HOME = os.environ.get("SKILLFORGE_BACKUPS", "~/.skillforge/backups")
 SKILLFORGE_VERSIONS = os.environ.get("SKILLFORGE_VERSIONS", "~/.skillforge/versions")
 # 编号缓存:/skill-列表 写入,/skill <n> 引用
 LAST_LIST_FILE = os.environ.get("SKILLFORGE_LAST_LIST", "~/.skillforge/.last_list.json")
+# v9.6: 用户收藏的 skill (name 集合),catalog 展示时加 ⭐
+FAVORITES_FILE = os.environ.get("SKILLFORGE_FAVORITES", "~/.skillforge/.favorites.json")
+
+
+def load_favorites() -> set:
+    """收藏名字集合。文件不存在返回空 set。"""
+    p = Path(FAVORITES_FILE).expanduser()
+    if not p.exists():
+        return set()
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return set(data.get("favorites") or [])
+    except Exception:
+        return set()
+
+
+def save_favorites(names: set):
+    """写盘。文件夹自动 mkdir。"""
+    p = Path(FAVORITES_FILE).expanduser()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    data = {"saved_at": int(_now()), "favorites": sorted(names)}
+    p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def is_favorite(name: str) -> bool:
+    return name in load_favorites()
+
+
+def add_favorite(name: str) -> bool:
+    """收藏。已在集合返回 False,否则 True。"""
+    favs = load_favorites()
+    if name in favs:
+        return False
+    favs.add(name)
+    save_favorites(favs)
+    return True
+
+
+def remove_favorite(name: str) -> bool:
+    """取消收藏。不在返回 False,成功 True。"""
+    favs = load_favorites()
+    if name not in favs:
+        return False
+    favs.discard(name)
+    save_favorites(favs)
+    return True
 
 
 def save_last_list(mapping: dict):
@@ -1928,14 +1974,26 @@ def generate_catalog(out_path=None, brief=None) -> Path:
         bits.append("🔵")
         return "".join(bits)
 
+    # v9.6: 加载收藏一次(避免每 skill 重复 IO)
+    favs = load_favorites()
+
+    def _prefix(s, customized: bool) -> str:
+        """构造前缀 emoji 序列:🏠(本工具) + ⭐(收藏) + ✨(已定制)。"""
+        parts = []
+        if s.name == "skillforge":
+            parts.append("🏠")
+        if s.name in favs:
+            parts.append("⭐")
+        if customized:
+            parts.append("✨")
+        return "".join(parts) + " " if parts else ""
+
     def _render_brief(s, idx, customized=False):
-        marker = "✨ " if customized else ""
-        return [f"- `{idx:>2}.` **{marker}{s.name}** <sub>{_ver_short(s.name)}</sub> — {brief_for(s.name, s.description, lang)}"]
+        return [f"- `{idx:>2}.` **{_prefix(s, customized)}{s.name}** <sub>{_ver_short(s.name)}</sub> — {brief_for(s.name, s.description, lang)}"]
 
     def _render_full(s, idx, customized=False):
-        marker = "✨ " if customized else ""
         return [
-            f"#### {idx}. {marker}{s.name}  <sub>{_ver_short(s.name)}</sub>",
+            f"#### {idx}. {_prefix(s, customized)}{s.name}  <sub>{_ver_short(s.name)}</sub>",
             "",
             f"{s.description or '_(无描述)_'}",
             "",
@@ -1994,8 +2052,15 @@ def generate_catalog(out_path=None, brief=None) -> Path:
         lines.append("")
 
     # 尾注:告诉用户/后续 agent 编号从这里来
-    tail_zh = f"\n> 💡 共 **{idx-1}** 项。用 `/skill-详情 <编号>` 或 `/skill-info <编号>` 直接看某项详情;编号与 CATALOG 显示顺序一致,30 天有效。"
-    tail_en = f"\n> 💡 Total **{idx-1}** items. Use `/skill-info <n>` or `/skill-详情 <n>` to inspect any item; numbers match CATALOG order, valid for 30 days."
+    fav_count = len(favs)
+    tail_zh = (
+        f"\n> 💡 共 **{idx-1}** 项(⭐ 收藏 {fav_count})。用 `/skill-详情 <编号>` 看详情;"
+        f"`/skill-收藏 <编号>` 加 ⭐;`/skill-取消收藏 <编号>` 去 ⭐;🏠 = 本工具自身。"
+    )
+    tail_en = (
+        f"\n> 💡 Total **{idx-1}** items (⭐ favorites: {fav_count}). "
+        f"`/skill-info <n>` inspect; `/skill-favorite <n>` add ⭐; `/skill-unfavorite <n>` remove ⭐; 🏠 = this tool itself."
+    )
     lines.append(tail_zh if lang == "zh" else tail_en)
 
     out.write_text("\n".join(lines), encoding="utf-8")
@@ -2175,6 +2240,49 @@ def cmd_which(args):
         print(f'     b) export ANTHROPIC_API_KEY 后跑,LLM 会做语义匹配')
     print(f'   或运行  skillforge find "{query}"  去 GitHub 找一个并安装。')
     return False
+
+
+def cmd_favorite(args):
+    """favorite <name|编号>: 收藏一个已装 skill,catalog 里前缀 ⭐。"""
+    name = resolve_skill(args.target)
+    if not name:
+        print(f"❌ 找不到 '{args.target}' (试 /skill-列表 拿最新编号)", file=sys.stderr)
+        sys.exit(1)
+    if add_favorite(name):
+        print(f"⭐ 已收藏 {name}")
+    else:
+        print(f"(已在收藏里) {name}")
+    try:
+        generate_catalog()
+    except Exception:
+        pass
+
+
+def cmd_unfavorite(args):
+    """unfavorite <name|编号>: 取消收藏。"""
+    name = resolve_skill(args.target)
+    if not name:
+        print(f"❌ 找不到 '{args.target}'", file=sys.stderr)
+        sys.exit(1)
+    if remove_favorite(name):
+        print(f"☆ 已取消收藏 {name}")
+    else:
+        print(f"(本来就没收藏) {name}")
+    try:
+        generate_catalog()
+    except Exception:
+        pass
+
+
+def cmd_favorite_list(args):
+    """favorite-list: 列出所有收藏。"""
+    favs = load_favorites()
+    if not favs:
+        print("(暂无收藏。用 /skill-收藏 <编号|name> 加入)")
+        return
+    print(f"⭐ 收藏 ({len(favs)}):")
+    for n in sorted(favs):
+        print(f"  ⭐ {n}")
 
 
 def _cjk_hint_en(cn_query: str) -> str:
@@ -2673,7 +2781,7 @@ python {skillforge_path} <subcommand> [...]
 
 3. 用户提供 PAT 后,只写进本次会话的 env,**不写盘、不 commit、不横传**
 
-**不需要 token** 的路径:`list` / `catalog` / `intro` / `detail` / `suggest` / `rollback` / `uninstall`(纯本地操作)。
+**不需要 token** 的路径:`list` / `catalog` / `intro` / `detail` / `suggest` / `rollback` / `uninstall` / `favorite` / `unfavorite` / `favorite-list`(纯本地操作)。
 
 ## 何时用本技能
 
@@ -2774,6 +2882,9 @@ def cmd_self_install(args):
         "skill-介绍.md": "skill-intro.md",
         "skill-帮助.md": "skill-help.md",
         "skill-建议.md": "skill-suggest.md",
+        # v9.6: 收藏
+        "skill-收藏.md": "skill-favorite.md",
+        "skill-取消收藏.md": "skill-unfavorite.md",
     }
     print(f"\n📂 准备 {len(templates)} 个 slash 模板 + 各自的 ASCII 别名:")
     for t in templates:
@@ -3794,6 +3905,18 @@ def build_parser():
     pt.add_argument("action", choices=["list", "add", "remove"])
     pt.add_argument("items", nargs="*", help="owner 或 owner/repo,小写")
     pt.set_defaults(func=cmd_trust)
+
+    # v9.6: 收藏
+    pfa = sub.add_parser("favorite", help="收藏一个 skill,catalog 里前缀 ⭐")
+    pfa.add_argument("target", help="name 或编号")
+    pfa.set_defaults(func=cmd_favorite)
+
+    puf = sub.add_parser("unfavorite", help="取消收藏")
+    puf.add_argument("target", help="name 或编号")
+    puf.set_defaults(func=cmd_unfavorite)
+
+    pfl = sub.add_parser("favorite-list", help="列出所有收藏")
+    pfl.set_defaults(func=cmd_favorite_list)
 
     pc = sub.add_parser("consolidate", help="把同名物理副本合并到 SKILLFORGE_HOME 并改软链")
     pc.add_argument("--dry-run", action="store_true", help="只显示计划不执行")

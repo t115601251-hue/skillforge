@@ -763,6 +763,92 @@ class TestBrief(unittest.TestCase):
             self.assertIn("####", content)
 
 
+class TestFavorites(unittest.TestCase):
+    """v9.6: 收藏功能 (add/remove/is/load/save + catalog 前缀)."""
+
+    def setUp(self):
+        # 用临时文件避免污染用户实际收藏
+        import tempfile, pathlib
+        self._tmpdir = tempfile.mkdtemp()
+        self._orig_file = skillforge.FAVORITES_FILE
+        skillforge.FAVORITES_FILE = str(pathlib.Path(self._tmpdir) / "favs.json")
+
+    def tearDown(self):
+        skillforge.FAVORITES_FILE = self._orig_file
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_empty_by_default(self):
+        self.assertEqual(skillforge.load_favorites(), set())
+        self.assertFalse(skillforge.is_favorite("figma"))
+
+    def test_add_then_load(self):
+        self.assertTrue(skillforge.add_favorite("figma"))
+        self.assertFalse(skillforge.add_favorite("figma"))  # 重复 → False
+        self.assertTrue(skillforge.is_favorite("figma"))
+        self.assertEqual(skillforge.load_favorites(), {"figma"})
+
+    def test_remove(self):
+        skillforge.add_favorite("kami")
+        self.assertTrue(skillforge.remove_favorite("kami"))
+        self.assertFalse(skillforge.remove_favorite("kami"))  # 二次移除 → False
+        self.assertFalse(skillforge.is_favorite("kami"))
+
+    def test_multiple(self):
+        for n in ["a", "b", "c"]:
+            skillforge.add_favorite(n)
+        self.assertEqual(skillforge.load_favorites(), {"a", "b", "c"})
+        skillforge.remove_favorite("b")
+        self.assertEqual(skillforge.load_favorites(), {"a", "c"})
+
+    def test_persistence_across_calls(self):
+        """save 后 load 能拿回一致集合。"""
+        skillforge.add_favorite("figma")
+        skillforge.add_favorite("kami")
+        # 模拟新进程:直接读文件
+        import json, pathlib
+        raw = json.loads(pathlib.Path(skillforge.FAVORITES_FILE).read_text(encoding="utf-8"))
+        self.assertIn("figma", raw["favorites"])
+        self.assertIn("kami", raw["favorites"])
+
+
+class TestCatalogPrefixes(unittest.TestCase):
+    """v9.6: catalog 里 🏠 / ⭐ 前缀。"""
+
+    def setUp(self):
+        import tempfile, pathlib
+        self._tmpdir = tempfile.mkdtemp()
+        self._orig_fav = skillforge.FAVORITES_FILE
+        skillforge.FAVORITES_FILE = str(pathlib.Path(self._tmpdir) / "favs.json")
+
+    def tearDown(self):
+        skillforge.FAVORITES_FILE = self._orig_fav
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_skillforge_gets_house_prefix(self):
+        """本工具 skillforge 项前必有 🏠。"""
+        import tempfile, pathlib
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "cat.md"
+            skillforge.generate_catalog(out_path=str(path), brief=True)
+            content = path.read_text(encoding="utf-8")
+            # skillforge 行必须带 🏠 前缀
+            self.assertRegex(content, r"\*\*🏠 skillforge\*\*",
+                             "skillforge 行应有 🏠 前缀,实际:\n" + [l for l in content.split("\n") if "skillforge" in l and "**" in l][0] if any("skillforge" in l for l in content.split("\n")) else "找不到 skillforge 行")
+
+    def test_favorite_gets_star_prefix(self):
+        """收藏项前有 ⭐。"""
+        import tempfile, pathlib
+        skillforge.add_favorite("kami")  # 假设 kami 已装(测试环境应有)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "cat.md"
+            skillforge.generate_catalog(out_path=str(path), brief=True)
+            content = path.read_text(encoding="utf-8")
+            if "kami" in content:  # 只有 kami 装了才断言
+                self.assertRegex(content, r"\*\*⭐ kami\*\*")
+
+
 class TestCategorize(unittest.TestCase):
     """v8: skill 分类规则匹配 + cache。"""
     def test_letta_prefix_wins(self):
