@@ -1073,10 +1073,67 @@ def _stars(level: str) -> str:
             "谨慎": "⭐ 谨慎   ", "不推荐": "❌ 不推荐 "}.get(level, level)
 
 
+def _u_breakdown(m: dict) -> list:
+    """把 U (使用度) 分拆成 6 项子指标,与 compute_u_score 逻辑一致。
+    返回 [(label, points, max, note), ...],用于 render_top3 明细展示。"""
+    def _log(n, ceiling):
+        return min(1.0, math.log10((n or 0) + 1) / math.log10(ceiling + 1))
+    s = m.get('stargazers_count') or 0
+    w = m.get('subscribers_count') or 0
+    f = m.get('forks_count') or 0
+    d = m.get('monthly_downloads')
+    r = m.get('release_count') or 0
+    c = m.get('close_rate')
+    return [
+        ('star',      round(_log(s, 100000) * 20, 1),  20, f'★{s}'),
+        ('watch',     round(_log(w, 10000)  * 20, 1),  20, f'👁{w}'),
+        ('fork',      round(_log(f, 10000)  * 15, 1),  15, f'🔱{f}'),
+        ('download',  round(_log(d, 10000000) * 30, 1) if d is not None else 0.0,  30,
+                      f'📥{d}/月' if d is not None else '📥无'),
+        ('release',   round(min(r, 20) / 20 * 10, 1),  10, f'📦{r}个'),
+        ('close_rate',round((c or 0) * 5, 1),           5,
+                      f'💬{int((c or 0)*100)}%' if c is not None else '💬无历史'),
+    ]
+
+
+def _t_breakdown(m: dict, scorecard=None, osv_vulns=None) -> list:
+    """把 T (治理度) 分拆成 加分项 + 惩罚项,与 compute_t_score 逻辑一致。
+    返回 [(label, points, max, note), ...]"""
+    if m.get('archived'):
+        return [('archived', 0, 100, '归档 → 直接 0')]
+    items = []
+    items.append(('LICENSE',    20 if m.get('license') else 0, 20, str(m.get('license') or '无')[:20]))
+    items.append(('主分支名',   15 if m.get('default_branch') in {'main','master','develop'} else 0, 15, m.get('default_branch','?')))
+    push_age = _age_days(m.get('pushed_at',''))
+    items.append(('近期活跃',   15 if push_age <= 90 else 0, 15, f'{push_age}天前 push'))
+    contribs = m.get('contributors_count') or 0
+    items.append(('多维护者',   10 if contribs >= 3 else 0, 10, f'{contribs}人'))
+    age = _age_days(m.get('created_at',''))
+    items.append(('存活>90天',  10 if age >= 90 else 0, 10, f'仓龄{age}天'))
+    items.append(('开 issues',  10 if m.get('has_issues') else 0, 10, '是' if m.get('has_issues') else '否'))
+    items.append(('组织所有',    5 if (m.get('owner') or {}).get('type') == 'Organization' else 0, 5, (m.get('owner') or {}).get('type','?')))
+    items.append(('有 topics',   5 if m.get('topics') else 0, 5, f'{len(m.get("topics") or [])}个'))
+    stars = m.get('stargazers_count') or 0
+    if age < 14 and stars > 100:
+        items.append(('star farming惩罚', -30, 0, f'<14天却>{stars}★'))
+    if contribs == 1 and stars > 100 and age < 60:
+        items.append(('单人堆星惩罚', -20, 0, f'1人<60天{stars}★'))
+    if push_age > 365:
+        items.append(('长期不更新惩罚', -10, 0, f'>{push_age}天没 push'))
+    if scorecard and isinstance(scorecard.get('score'), (int, float)):
+        items.append(('OpenSSF Scorecard', int(round(scorecard['score'])), 10, f'{scorecard["score"]}/10'))
+    if osv_vulns:
+        n_crit = sum(1 for v in osv_vulns if (v.get('severity') or '').upper() in {'HIGH','CRITICAL'})
+        if n_crit:
+            items.append(('OSV高危惩罚', -min(50, 30*n_crit), 0, f'{n_crit}个HIGH/CRITICAL'))
+    return items
+
+
 def render_top3(query: str, ranked: list, meta_by_name: dict, trusted_set: set) -> str:
-    """ranked:llm_final_rank 输出;meta_by_name: full_name → 完整 meta(含 install_cmds);trusted_set:owner 白名单集合。"""
+    """ranked:llm_final_rank 输出;meta_by_name: full_name → 完整 meta(含 install_cmds);trusted_set:owner 白名单集合。
+    v9.5: 编号 1-based, U/T 展开子指标明细。"""
     lines = [f"🔎 「{query}」 → Top {len(ranked)}\n"]
-    for i, item in enumerate(ranked):
+    for i, item in enumerate(ranked, start=1):
         fn = item["full_name"]
         m = meta_by_name.get(fn, {})
         installs = m.get("install_cmds") or []
@@ -1084,27 +1141,35 @@ def render_top3(query: str, ranked: list, meta_by_name: dict, trusted_set: set) 
         owner = fn.split("/")[0].lower()
         trusted = "是" if (owner in trusted_set or fn.lower() in trusted_set) else "否"
 
-        rate_str = (f"{int((m.get('close_rate') or 0) * 100)}%"
-                    if m.get("close_rate") is not None else "无历史")
-        lines.append(f"  [{i}] {_stars(item.get('recommend_level',''))}  {fn}  ({m.get('language','')})")
+        lines.append(f"  {i}. {_stars(item.get('recommend_level',''))}  {fn}  ({m.get('language','')})")
         r = item.get("R")
         r_str = f"{r}/10" if r is not None else "--"
-        lines.append(f"      R 相关 {r_str}  ·  U 使用 {m.get('U',0)}/100  ·  T 治理 {m.get('T',0)}/100")
-        lines.append(
-            f"      ★ {_fmt_int(m.get('stargazers_count'))}  "
-            f"👁 {_fmt_int(m.get('subscribers_count'))}  "
-            f"🔱 {_fmt_int(m.get('forks_count'))}  "
-            f"📥 {_fmt_int(m.get('monthly_downloads'))}  "
-            f"📦 {m.get('release_count',0)} release  "
-            f"💬 {rate_str} 闭合"
-        )
-        # v2: Scorecard + OSV 安全行
+        lines.append(f"      R 相关 {r_str}  (agent 主观判断:描述与需求匹配度)")
+
+        # U 明细
+        u_items = _u_breakdown(m)
+        u_total = m.get('U', 0)
+        u_parts = "  ".join(f"{lab}:{p}/{mx}({note})" for lab, p, mx, note in u_items)
+        lines.append(f"      U 使用 {u_total}/100")
+        lines.append(f"          = {u_parts}")
+
+        # T 明细
         sc = m.get("scorecard")
-        if sc is None:
-            sc_str = "🛡 Scorecard 无收录"
-        else:
-            sc_str = f"🛡 Scorecard {sc.get('score','?')}/10"
         osv = m.get("osv_vulns") or []
+        t_items = _t_breakdown(m, scorecard=sc, osv_vulns=osv)
+        t_total = m.get('T', 0)
+        # 加分 vs 惩罚分开
+        pos = [it for it in t_items if it[1] >= 0]
+        neg = [it for it in t_items if it[1] < 0]
+        t_parts = "  ".join(f"{lab}:{p}/{mx}({note})" for lab, p, mx, note in pos)
+        lines.append(f"      T 治理 {t_total}/100")
+        lines.append(f"          = {t_parts}")
+        if neg:
+            neg_parts = "  ".join(f"{lab}:{p}({note})" for lab, p, _, note in neg)
+            lines.append(f"          ⚠ 惩罚: {neg_parts}")
+
+        # 安全汇总行
+        sc_str = "🛡 Scorecard 无收录" if sc is None else f"🛡 Scorecard {sc.get('score','?')}/10"
         n_crit = sum(1 for v in osv if (v.get("severity") or "").upper() in {"HIGH", "CRITICAL"})
         if not osv:
             osv_str = "OSV 0 vuln"
@@ -1113,10 +1178,11 @@ def render_top3(query: str, ranked: list, meta_by_name: dict, trusted_set: set) 
         else:
             osv_str = f"OSV {len(osv)} 低中危"
         lines.append(f"      {sc_str}  ·  {osv_str}")
+
         lines.append(f"      推荐: {item.get('why','')}")
         risks = item.get("risks") or []
         lines.append(f"      风险: {'  '.join(risks) if risks else '(无)'}")
-        # v8: 适合/不适合(LLM 没生成时从 description 抠)
+
         suit = item.get("suitable") or _extract_clause(
             m.get("description",""),
             [r"Use when ([^.。\n]+)", r"使用[场]?景[:: ]([^.。\n]+)"]
@@ -2853,6 +2919,16 @@ def cmd_deep_data(args):
             "release_count": m.get("release_count", 0),
             "close_rate": m["close_rate"],
             "monthly_downloads": m["monthly_downloads"],
+            # v9.5: T 分明细需要下列原始字段
+            "license": m.get("license"),
+            "pushed_at": m.get("pushed_at", ""),
+            "created_at": m.get("created_at", ""),
+            "contributors_count": m.get("contributors_count", 0),
+            "has_issues": m.get("has_issues"),
+            "owner": m.get("owner") or {},
+            "topics": m.get("topics") or [],
+            "archived": m.get("archived", False),
+            "scorecard": m["scorecard"],
             "scorecard_score": m["scorecard"].get("score") if m["scorecard"] else None,
             "scorecard_failed_checks": sc_failed,
             "osv_vulns": m["osv_vulns"],

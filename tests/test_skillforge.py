@@ -415,6 +415,63 @@ class TestRenderTop3(unittest.TestCase):
         self.assertIn("仓库太新", text)
         self.assertIn("单一维护者", text)
 
+    def test_index_is_one_based(self):
+        """v9.5: 编号从 1. 开始, 不再用 [0]/[1]/[2]."""
+        ranked = [
+            {"full_name": "a/b", "R": 9, "recommend_level": "强推", "why": "x", "risks": []},
+            {"full_name": "c/d", "R": 8, "recommend_level": "推荐", "why": "y", "risks": []},
+        ]
+        meta = {n: {"full_name": n, "U": 10, "T": 50, "install_cmds": []} for n in ["a/b","c/d"]}
+        text = skillforge.render_top3("q", ranked, meta, trusted_set=set())
+        self.assertIn("1. ", text)
+        self.assertIn("2. ", text)
+        self.assertNotIn("[0]", text)
+        self.assertNotIn("[1]", text)
+
+    def test_score_breakdown_visible(self):
+        """v9.5: U/T 明细必须展示子指标。"""
+        ranked = [{"full_name": "a/b", "R": 9, "recommend_level": "强推", "why": "", "risks": []}]
+        meta = {"a/b": {
+            "full_name": "a/b", "stargazers_count": 100, "subscribers_count": 10,
+            "forks_count": 5, "monthly_downloads": 500, "release_count": 2, "close_rate": 0.8,
+            "license": "MIT", "default_branch": "main", "pushed_at": "2026-06-20",
+            "created_at": "2025-06-01", "has_issues": True, "contributors_count": 3,
+            "owner": {"type": "User"}, "topics": ["ai"],
+            "U": 30, "T": 80, "install_cmds": [],
+        }}
+        text = skillforge.render_top3("q", ranked, meta, trusted_set=set())
+        # U breakdown 子标签
+        for lab in ["star:", "fork:", "download:", "release:", "close_rate:"]:
+            self.assertIn(lab, text, f"U 明细缺 {lab}")
+        # T breakdown 子标签
+        for lab in ["LICENSE:", "主分支名:", "近期活跃:", "多维护者:", "开 issues:"]:
+            self.assertIn(lab, text, f"T 明细缺 {lab}")
+
+    def test_penalty_line_shown(self):
+        """v9.5: T 分若有惩罚项,单独一行标 ⚠ 惩罚。"""
+        ranked = [{"full_name": "a/b", "R": 5, "recommend_level": "谨慎", "why": "", "risks": []}]
+        # 触发单人堆星惩罚: 1 contributor + >100 stars + age <60
+        # 注意 _age_days 只认 ISO 完整 datetime 格式(带 T + Z)
+        meta = {"a/b": {
+            "full_name": "a/b", "stargazers_count": 200, "contributors_count": 1,
+            "created_at": "2026-06-15T00:00:00Z",
+            "pushed_at": "2026-06-20T00:00:00Z",
+            "U": 25, "T": 30, "install_cmds": [],
+        }}
+        text = skillforge.render_top3("q", ranked, meta, trusted_set=set())
+        self.assertIn("⚠ 惩罚", text)
+        self.assertIn("单人堆星惩罚", text)
+
+    def test_u_breakdown_sums_close_to_total(self):
+        """v9.5: _u_breakdown 各项之和应接近 compute_u_score 总分(±1 容差 rounding)。"""
+        meta = {"stargazers_count": 500, "subscribers_count": 20, "forks_count": 30,
+                "monthly_downloads": 10000, "release_count": 5, "close_rate": 0.9}
+        subtotal = sum(p for _, p, _, _ in skillforge._u_breakdown(meta))
+        u = skillforge.compute_u_score(
+            stars=500, watchers=20, forks=30, downloads=10000, release_count=5, close_rate=0.9)
+        self.assertAlmostEqual(subtotal, u, delta=2.0,
+            msg=f"_u_breakdown sum={subtotal} 偏离 compute_u_score={u}")
+
 
 class TestFetchScorecard(unittest.TestCase):
     def test_returns_score_and_checks(self):
