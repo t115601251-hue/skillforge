@@ -28,10 +28,10 @@ python skillforge.py find "image OCR"    # 去 GitHub 找新的(LLM + 安全审)
 
 | 场景 | 命令 | 干什么 |
 |---|---|---|
-| **看本地** | `list` 或 `/skill列表` | 按 27 类分段,每类按 specificity+usage+name 三轴排;`--cat 部署` 只看一类 |
-| **本地路由** | `suggest "<需求>"` 或 `/skill建议` | 从已装推 Top 3 (Markdown 表 + "适合/不适合"列),不联网 |
-| **找新的** | `find "<需求>"` 或 `/skill查找` | 去 GitHub:agent 三角度改写 → Scorecard+OSV 安全审 → Top 3 + R/U/T 三维分 |
-| **客制化** | `modify <name> <需求>` 或 `/skill修改` | agent 读源码出 diff → 自动快照三槽位 → 应用,可一键回滚 |
+| **看本地** | `list` 或 `/skill-列表` | 按 27 类分段,每类按 specificity+usage+name 三轴排;`--cat 部署` 只看一类 |
+| **本地路由** | `suggest "<需求>"` 或 `/skill-建议` | 从已装推 Top 3 (Markdown 表 + "适合/不适合"列),不联网 |
+| **找新的** | `find "<需求>"` 或 `/skill-查找` | 去 GitHub:agent 三角度改写 → Scorecard+OSV 安全审 → Top 3 + R/U/T 三维分 |
+| **客制化** | `modify <name> <需求>` 或 `/skill-修改` | agent 读源码出 diff → 自动快照三槽位 → 应用,可一键回滚 |
 
 ---
 
@@ -161,17 +161,17 @@ python skillforge.py self-install   # 一次性自部署:写自身 SKILL.md + 9 
 
 | 中文 slash | ASCII 别名 | 行为 |
 |---|---|---|
-| `/skill查找 <需求>` | `/skill-find <需求>` | 去 GitHub 找:LLM 流水线 Top 3 推荐 |
-| `/skill建议 <需求>` | `/skill-suggest <需求>` | **纯本地**路由:从已装 skill 推荐 Top 3 (markdown 表格 + "适合/不适合") |
-| `/skill安装 <编号或 owner/repo>` | `/skill-install <...>` | 装一个,装完自动介绍 |
-| `/skill列表` | `/skill-list` | **v8 升级**:按 category 分 27 类展示,specificity+usage+name 三轴排序;`--cat 部署` 只看某类;`--flat`/`--brief`/`--full` |
+| `/skill-查找 <需求>` | `/skill-find <需求>` | 去 GitHub 找:LLM 流水线 Top 3 推荐 |
+| `/skill-建议 <需求>` | `/skill-suggest <需求>` | **纯本地**路由:从已装 skill 推荐 Top 3 (markdown 表格 + "适合/不适合") |
+| `/skill-安装 <编号或 owner/repo>` | `/skill-install <...>` | 装一个,装完自动介绍 |
+| `/skill-列表` | `/skill-list` | **v8 升级**:按 category 分 27 类展示,specificity+usage+name 三轴排序;`--cat 部署` 只看某类;`--flat`/`--brief`/`--full` |
 | `/skill <编号>` | `/skill <编号>` | 快捷:看第 n 个详情 |
-| `/skill详情 <编号或name>` | `/skill-info <...>` | 看来源/安装命令/版本状态/定制历史 |
-| `/skill修改 <name> <需求>` | `/skill-modify <name> <...>` | LLM 改源码,自动快照,显 diff,确认应用 |
-| `/skill回滚 <name>` | `/skill-rollback <name>` | 默认 swap previous;`--pristine` 强制回 GitHub 原版 |
-| `/skill卸载 <name>` | `/skill-uninstall <name>` | 删软链 + 搬 backups/ |
-| `/skill介绍 <name>` | `/skill-intro <name>` | 一段中文口语化使用说明 + 分类标签 + "何时别用" |
-| `/skill帮助` | `/skill-help` | 列所有 /skill* 命令 |
+| `/skill-详情 <编号或name>` | `/skill-info <...>` | 看来源/安装命令/版本状态/定制历史 |
+| `/skill-修改 <name> <需求>` | `/skill-modify <name> <...>` | LLM 改源码,自动快照,显 diff,确认应用 |
+| `/skill-回滚 <name>` | `/skill-rollback <name>` | 默认 swap previous;`--pristine` 强制回 GitHub 原版 |
+| `/skill-卸载 <name>` | `/skill-uninstall <name>` | 删软链 + 搬 backups/ |
+| `/skill-介绍 <name>` | `/skill-intro <name>` | 一段中文口语化使用说明 + 分类标签 + "何时别用" |
+| `/skill-帮助` | `/skill-help` | 列所有 /skill* 命令 |
 | `/skill <任意词>` | `/skill <任意词>` | 通用入口 router,中间带空格也容错(如 `/skill 帮助`) |
 
 ### 分类 + 多轴排序(v8)
@@ -184,10 +184,10 @@ python skillforge.py self-install   # 一次性自部署:写自身 SKILL.md + 9 
 
 借鉴 Codex 侧 skill-router profile 的"最窄可用能力优先"原则。
 
-### `/skill建议` vs `/skill查找` 区别
+### `/skill-建议` vs `/skill-查找` 区别
 
-- **`/skill建议 <需求>`** —— **纯本地**,从已装 74+ skill 里推 Top 3 (Markdown 表格,带"适合 / 不适合"列);**不**联网
-- **`/skill查找 <需求>`** —— 去 **GitHub 找新的**,LLM 三角度改写 → 多搜 → Scorecard/OSV 安全审 → Top 3
+- **`/skill-建议 <需求>`** —— **纯本地**,从已装 74+ skill 里推 Top 3 (Markdown 表格,带"适合 / 不适合"列);**不**联网
+- **`/skill-查找 <需求>`** —— 去 **GitHub 找新的**,LLM 三角度改写 → 多搜 → Scorecard/OSV 安全审 → Top 3
 
 ### 版本三槽位(v3)
 
@@ -196,11 +196,11 @@ python skillforge.py self-install   # 一次性自部署:写自身 SKILL.md + 9 
 | 槽 | 内容 | 何时写 |
 |---|---|---|
 | 🟢 **pristine** | GitHub 拉下来的原版 | 安装时**写一次**,永不变 |
-| 🟡 **previous** | 上次修改完的版本 | 每次 `/skill修改` 前快照当前 |
+| 🟡 **previous** | 上次修改完的版本 | 每次 `/skill-修改` 前快照当前 |
 | 🔵 **current** | 当前在用 | 一直被 agent 看到 |
 
-`/skill回滚 <name>` 默认 **swap 模式** — current ↔ previous 互换(回滚后再回滚回到原状)。
-`/skill回滚 <name> --pristine` 强制回 GitHub 原版,当前 current 保存为 previous。
+`/skill-回滚 <name>` 默认 **swap 模式** — current ↔ previous 互换(回滚后再回滚回到原状)。
+`/skill-回滚 <name> --pristine` 强制回 GitHub 原版,当前 current 保存为 previous。
 
 存储:`~/.skillforge/versions/<name>/{pristine,previous}/` — **不在** agent 扫描路径里,绝不污染菜单。
 

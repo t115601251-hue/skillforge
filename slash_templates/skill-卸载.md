@@ -13,4 +13,4 @@ description: 卸载一个已装的 skill (数据搬 backups/ 不丢)
 
 误删了可以从 backups/ 手动恢复(还原 skill_dir 后 register_skill 重新软链)。
 
-提示用户卸载后:"该 skill 已下线。如果想重装直接 `/skill查找 <需求>` 重找,或精确 `/skill安装 owner/repo`。"
+提示用户卸载后:"该 skill 已下线。如果想重装直接 `/skill-查找 <需求>` 重找,或精确 `/skill-安装 owner/repo`。"

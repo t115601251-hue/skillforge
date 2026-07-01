@@ -45,7 +45,7 @@ TRUSTED_FILE = os.environ.get("SKILLFORGE_TRUSTED", "~/.skillforge/trusted.txt")
 BACKUP_HOME = os.environ.get("SKILLFORGE_BACKUPS", "~/.skillforge/backups")
 # 版本快照目录(三槽位:pristine / previous / current):不在 agent 扫描路径里
 SKILLFORGE_VERSIONS = os.environ.get("SKILLFORGE_VERSIONS", "~/.skillforge/versions")
-# 编号缓存:/skill列表 写入,/skill <n> 引用
+# 编号缓存:/skill-列表 写入,/skill <n> 引用
 LAST_LIST_FILE = os.environ.get("SKILLFORGE_LAST_LIST", "~/.skillforge/.last_list.json")
 
 
@@ -1403,7 +1403,7 @@ def mece_hint(key: str, lang: str = "zh") -> str:
 
 
 # 每个 skill 的紧凑双语释义(≤25 字中文 / ≤12 words 英文)
-# 用户 v9.1 明确要求:/skill列表 输出「英文名 + 一句中文释义」紧凑格式,不再贴原描述长文
+# 用户 v9.1 明确要求:/skill-列表 输出「英文名 + 一句中文释义」紧凑格式,不再贴原描述长文
 # 未收录的 skill 走 brief_for 的 fallback(取原 description 首句截断)
 _BRIEF_TRANSLATIONS = {
     # 🟢 Data Fetcher (6)
@@ -1871,7 +1871,7 @@ def generate_catalog(out_path=None, brief=None) -> Path:
     _render_one = _render_brief if brief else _render_full
 
     # 全局编号从 1 开始,顺序 = CATALOG.md 里出现的顺序;末尾写 .last_list.json,
-    # 让 /skill <编号> 快捷指令能直接命中用户看到的位置。
+    # 让 /skill-详情 <编号> 快捷指令能直接命中用户看到的位置。
     mapping = {}
     idx = 1
 
@@ -1921,8 +1921,8 @@ def generate_catalog(out_path=None, brief=None) -> Path:
         lines.append("")
 
     # 尾注:告诉用户/后续 agent 编号从这里来
-    tail_zh = f"\n> 💡 共 **{idx-1}** 项。用 `/skill <编号>` 或 `/skill详情 <编号>` 直接看某项详情;编号与 CATALOG 显示顺序一致,30 天有效。"
-    tail_en = f"\n> 💡 Total **{idx-1}** items. Use `/skill <n>` or `/skill详情 <n>` to inspect any item; numbers match CATALOG order, valid for 30 days."
+    tail_zh = f"\n> 💡 共 **{idx-1}** 项。用 `/skill-详情 <编号>` 或 `/skill-详情 <编号>` 直接看某项详情;编号与 CATALOG 显示顺序一致,30 天有效。"
+    tail_en = f"\n> 💡 Total **{idx-1}** items. Use `/skill <n>` or `/skill-详情 <n>` to inspect any item; numbers match CATALOG order, valid for 30 days."
     lines.append(tail_zh if lang == "zh" else tail_en)
 
     out.write_text("\n".join(lines), encoding="utf-8")
@@ -2271,7 +2271,7 @@ def cmd_modify(args):
         print(f"❌ skill '{name}' 不存在 ({skill_dir})", file=sys.stderr)
         return
     if not os.environ.get("ANTHROPIC_API_KEY"):
-        print("❌ /skill修改 需要 ANTHROPIC_API_KEY(此功能依赖 LLM 改源码)", file=sys.stderr)
+        print("❌ /skill-修改 需要 ANTHROPIC_API_KEY(此功能依赖 LLM 改源码)", file=sys.stderr)
         return
     request = " ".join(args.request or []).strip()
     if not request:
@@ -2351,7 +2351,7 @@ def cmd_rollback(args):
 
 
 def cmd_suggest(args):
-    """/skill建议:纯本地路由 — 输入自然语言,在已装 skill 里挑 Top 3 推荐(不去 GitHub)。
+    """/skill-建议:纯本地路由 — 输入自然语言,在已装 skill 里挑 Top 3 推荐(不去 GitHub)。
     输出 Markdown 表格,带"适合场景/不适合场景"两列(借鉴 Codex profile 排序模型)。
     """
     query = " ".join(args.query).strip()
@@ -2546,9 +2546,9 @@ def cmd_help(args):
   ~/.skillforge/versions/<n>/     pristine + previous(三槽位)
   ~/.skillforge/backups/          adoption/consolidate/uninstall 的备份
   ~/.skillforge/trusted.txt       owner 白名单
-  ~/.skillforge/.last_list.json   /skill <编号> 引用缓存(30 天过期)
+  ~/.skillforge/.last_list.json   /skill-详情 <编号> 引用缓存(30 天过期)
 
-通常用法: 在 agent 里说 /skill查找 你的需求 或直接描述,agent 会自动路由到对应命令。
+通常用法: 在 agent 里说 /skill-查找 你的需求 或直接描述,agent 会自动路由到对应命令。
 """)
 
 
@@ -2575,7 +2575,7 @@ def _skillforge_own_skill_md(skillforge_path: str) -> str:
     """skillforge 自己的 SKILL.md frontmatter description 写成"自然语言触发型"。"""
     return f"""---
 name: skillforge
-description: 跨 agent 技能闭环管理(查找/安装/列表/详情/修改/回滚/卸载/介绍)。触发:用户说"找一个/装一个/查一下/改一改/卸载.../查看 ... 的 skill / 技能 / 工具"。也通过 /skill查找 /skill列表 /skill 等 slash command 调用。
+description: 跨 agent 技能闭环管理(查找/安装/列表/详情/修改/回滚/卸载/介绍)。触发:用户说"找一个/装一个/查一下/改一改/卸载.../查看 ... 的 skill / 技能 / 工具"。也通过 /skill-查找 /skill-列表 /skill 等 slash command 调用。
 ---
 
 # skillforge
@@ -2598,16 +2598,16 @@ python {skillforge_path} <subcommand> [...]
 ## 怎么用
 
 详见 `python {skillforge_path} help`(列出所有 subcommand)和对应 slash command 模板:
-- /skill查找 <需求>
-- /skill安装 <编号|owner/repo>
-- /skill列表
-- /skill <编号>
-- /skill详情 <编号|name>
-- /skill修改 <编号|name> <需求>
-- /skill回滚 <name> [--pristine]
-- /skill卸载 <name>
-- /skill介绍 <name>
-- /skill帮助
+- /skill-查找 <需求>
+- /skill-安装 <编号|owner/repo>
+- /skill-列表
+- /skill-详情 <编号>
+- /skill-详情 <编号|name>
+- /skill-修改 <编号|name> <需求>
+- /skill-回滚 <name> [--pristine]
+- /skill-卸载 <name>
+- /skill-介绍 <name>
+- /skill-帮助
 
 ## 关键设计
 
@@ -2658,16 +2658,16 @@ def cmd_self_install(args):
     templates = sorted(templates_dir.glob("*.md"))
     # 中文 → ASCII 映射
     ASCII_ALIAS = {
-        "skill查找.md": "skill-find.md",
-        "skill列表.md": "skill-list.md",
-        "skill详情.md": "skill-info.md",
-        "skill安装.md": "skill-install.md",
-        "skill修改.md": "skill-modify.md",
-        "skill回滚.md": "skill-rollback.md",
-        "skill卸载.md": "skill-uninstall.md",
-        "skill介绍.md": "skill-intro.md",
-        "skill帮助.md": "skill-help.md",
-        "skill建议.md": "skill-suggest.md",
+        "skill-查找.md": "skill-find.md",
+        "skill-列表.md": "skill-list.md",
+        "skill-详情.md": "skill-info.md",
+        "skill-安装.md": "skill-install.md",
+        "skill-修改.md": "skill-modify.md",
+        "skill-回滚.md": "skill-rollback.md",
+        "skill-卸载.md": "skill-uninstall.md",
+        "skill-介绍.md": "skill-intro.md",
+        "skill-帮助.md": "skill-help.md",
+        "skill-建议.md": "skill-suggest.md",
     }
     print(f"\n📂 准备 {len(templates)} 个 slash 模板 + 各自的 ASCII 别名:")
     for t in templates:
@@ -2705,8 +2705,9 @@ def cmd_self_install(args):
         pass
 
     print(f"\n✅ 完成。共部署 {deployed} 个 slash 文件(每家中文+ASCII 双份)。")
-    print(f"   在 agent 输 / 时,中文型 (/skill帮助) 和 ASCII 型 (/skill-help) 都能用;")
+    print(f"   在 agent 输 / 时,中文型 (/skill-帮助) 和 ASCII 型 (/skill-help) 都能用;")
     print(f"   ASCII 那套能被自动补全下拉框搜到,中文那套适合直接敲。")
+    print(f"   ⚠ 裸 /skill 已废弃(易与 agent 内置命令冲突),改用 /skill-<X>。")
 
 
 # ----------------------------------------------------------------------------- v4: agent-as-LLM API
@@ -2919,7 +2920,7 @@ def cmd_modify_apply(args):
 
 
 def cmd_install(args):
-    """/skill安装:把 target 装下来。target 可以是:
+    """/skill-安装:把 target 装下来。target 可以是:
     - "owner/repo" → 先验仓库存在,再 find --repo --yes
     - "1" → 上次 list 的编号(数字)
     - 已装的 name → 提示"已装,看详情用 detail"
@@ -3015,7 +3016,7 @@ def cmd_install(args):
     print(f"     previous (上次修改前):    {'✓ 存在(可 rollback)' if has_previous else '✗ 还没修改过'}")
     print(f"     current (在用):           ✓")
     print(f"\n📝 描述:\n{meta.get('description','(无)')}\n")
-    print(f"调用例子: 跟 agent 说\"用 {name} 帮我 ...\" 自动触发,或用 /skill介绍 {name} 看简介。")
+    print(f"调用例子: 跟 agent 说\"用 {name} 帮我 ...\" 自动触发,或用 /skill-介绍 {name} 看简介。")
 
 
 def _specificity_label(meta: dict) -> str:
@@ -3405,7 +3406,7 @@ def _install_chosen(args, chosen: dict, token):
         for target, how in register_skill(skill_dir, link=not args.copy):
             print(f"  🔗 注册 {target}  ({how})")
 
-    # v3: 保存 pristine 版本(只在第一次安装时写,/skill修改 才有 baseline)
+    # v3: 保存 pristine 版本(只在第一次安装时写,/skill-修改 才有 baseline)
     try:
         save_pristine(name, skill_dir)
     except Exception as e:
@@ -3689,7 +3690,7 @@ def build_parser():
     pi.set_defaults(func=cmd_intro)
 
     pd = sub.add_parser("detail", help="看某个已装 skill 的详情(名字或编号)")
-    pd.add_argument("target", help="name 或 /skill列表 里的编号")
+    pd.add_argument("target", help="name 或 /skill-列表 里的编号")
     pd.set_defaults(func=cmd_detail)
 
     pin = sub.add_parser("install", help="装一个(编号|name|owner/repo)")

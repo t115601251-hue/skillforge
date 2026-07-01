@@ -17,6 +17,6 @@ description: 看某个已装 skill 的详细信息
 - 完整 description
 
 把输出原样转给用户,然后顺便提示:
-- "想改这个 skill: `/skill修改 $ARGUMENTS <怎么改>`"
-- "想看简介: `/skill介绍 $ARGUMENTS`"
-- "想卸载: `/skill卸载 $ARGUMENTS`"
+- "想改这个 skill: `/skill-修改 $ARGUMENTS <怎么改>`"
+- "想看简介: `/skill-介绍 $ARGUMENTS`"
+- "想卸载: `/skill-卸载 $ARGUMENTS`"

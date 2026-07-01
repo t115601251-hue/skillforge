@@ -49,6 +49,6 @@ description: 改一个已装 skill 的源码 (agent 做 LLM,skillforge 当工具
 - 应用,SKILL.md 加 ✨[已定制]
 
 **5. 告诉用户**
-"改完。想看效果就 try 一下;不满意 `/skill回滚 <name>` 一键 swap 回原状。"
+"改完。想看效果就 try 一下;不满意 `/skill-回滚 <name>` 一键 swap 回原状。"
 
-如果想强制回 GitHub 原版: `/skill回滚 <name> --pristine`
+如果想强制回 GitHub 原版: `/skill-回滚 <name> --pristine`

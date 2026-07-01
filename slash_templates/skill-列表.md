@@ -37,9 +37,9 @@ CATALOG.md 结构:
 - 每 skill 一行:`- **name** <sub>版本 emoji</sub> — 一句释义`
 
 **4. 尾部提示**
-- 想深挖某个:`/skill详情 <name>`
-- 想装新的(GitHub):`/skill查找 <需求>`
-- 想从已装推荐(本地):`/skill建议 <需求>`
+- 想深挖某个:`/skill-详情 <name>`
+- 想装新的(GitHub):`/skill-查找 <需求>`
+- 想从已装推荐(本地):`/skill-建议 <需求>`
 
 ## 兜底
 
