@@ -1855,20 +1855,25 @@ def generate_catalog(out_path=None, brief=None) -> Path:
         bits.append("🔵")
         return "".join(bits)
 
-    def _render_brief(s, customized=False):
+    def _render_brief(s, idx, customized=False):
         marker = "✨ " if customized else ""
-        return [f"- **{marker}{s.name}** <sub>{_ver_short(s.name)}</sub> — {brief_for(s.name, s.description, lang)}"]
+        return [f"- `{idx:>2}.` **{marker}{s.name}** <sub>{_ver_short(s.name)}</sub> — {brief_for(s.name, s.description, lang)}"]
 
-    def _render_full(s, customized=False):
+    def _render_full(s, idx, customized=False):
         marker = "✨ " if customized else ""
         return [
-            f"#### {marker}{s.name}  <sub>{_ver_short(s.name)}</sub>",
+            f"#### {idx}. {marker}{s.name}  <sub>{_ver_short(s.name)}</sub>",
             "",
             f"{s.description or '_(无描述)_'}",
             "",
         ]
 
     _render_one = _render_brief if brief else _render_full
+
+    # 全局编号从 1 开始,顺序 = CATALOG.md 里出现的顺序;末尾写 .last_list.json,
+    # 让 /skill <编号> 快捷指令能直接命中用户看到的位置。
+    mapping = {}
+    idx = 1
 
     mece_order = ["data_fetcher", "content_transformer", "multi_modal_generator",
                   "action_executor", "integration_utility", "native_infra"]
@@ -1888,7 +1893,9 @@ def generate_catalog(out_path=None, brief=None) -> Path:
         lines.append("")
         members = _sort_by_priority(members)
         for s in members:
-            lines.extend(_render_one(s, customized=False))
+            lines.extend(_render_one(s, idx, customized=False))
+            mapping[idx] = s.name
+            idx += 1
         lines.append("")
         lines.append("---")
         lines.append("")
@@ -1898,7 +1905,9 @@ def generate_catalog(out_path=None, brief=None) -> Path:
         lines.append(f"{title}  ({len(custom)})")
         lines.append("")
         for s in _sort_by_priority(custom):
-            lines.extend(_render_one(s, customized=True))
+            lines.extend(_render_one(s, idx, customized=True))
+            mapping[idx] = s.name
+            idx += 1
         lines.append("")
         lines.append("---")
         lines.append("")
@@ -1911,7 +1920,17 @@ def generate_catalog(out_path=None, brief=None) -> Path:
             lines.append(f"- ✕ **{s.name}** — `{s.path}`")
         lines.append("")
 
+    # 尾注:告诉用户/后续 agent 编号从这里来
+    tail_zh = f"\n> 💡 共 **{idx-1}** 项。用 `/skill <编号>` 或 `/skill详情 <编号>` 直接看某项详情;编号与 CATALOG 显示顺序一致,30 天有效。"
+    tail_en = f"\n> 💡 Total **{idx-1}** items. Use `/skill <n>` or `/skill详情 <n>` to inspect any item; numbers match CATALOG order, valid for 30 days."
+    lines.append(tail_zh if lang == "zh" else tail_en)
+
     out.write_text("\n".join(lines), encoding="utf-8")
+    if mapping:
+        try:
+            save_last_list(mapping)
+        except Exception:
+            pass  # 不影响 catalog 写入
     return out
 
 
