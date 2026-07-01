@@ -1310,9 +1310,209 @@ CATALOG_FILE = os.environ.get("SKILLFORGE_CATALOG", "~/.skillforge/CATALOG.md")
 CATEGORIES_CACHE = os.environ.get("SKILLFORGE_CATEGORIES", "~/.skillforge/.categories.json")
 USAGE_STATS_FILE = os.environ.get("SKILLFORGE_USAGE", "~/.skillforge/.usage_stats.json")
 
-# 分类规则:keyword → category。匹配 description + name 的小写文本。
-# 第一个命中的优先 → 把"专用程度强、特征词独占"的类放前面,"宽词" 类放后面。
-# 经实测调过几轮(对当前 74 个 skill 命中正确率高)。"其它"兜底。
+# ============================================================================
+# MECE 五大一级分类(v9,借鉴用户提供的零级红线 protocol)
+# 5 个业务类 + 1 个"环境隔离区"(native infra 剥离)
+# 双语标签:根据 --lang zh/en/auto 输出
+# ============================================================================
+
+# 语言检测
+def detect_lang(query_text: str = None, explicit: str = None) -> str:
+    """决定输出语言。优先级:explicit > query CJK > env LANG > 'zh' 默认。"""
+    if explicit and explicit in ("zh", "en"):
+        return explicit
+    if query_text:
+        if any("一" <= c <= "鿿" for c in query_text):
+            return "zh"
+        # 纯英文 query 且长度 >= 3 → en
+        if len(query_text.strip()) >= 3:
+            return "en"
+    lang = os.environ.get("LANG", "") or os.environ.get("LC_ALL", "")
+    if lang.startswith(("en_", "en-", "en.")):
+        return "en"
+    return "zh"  # 默认中文(会话主要语种)
+
+
+# MECE 5+1 分类字典(每个 key 都有 zh/en/contract_zh/contract_en/hint_zh/hint_en)
+_MECE_CATEGORIES = {
+    "data_fetcher": {
+        "zh": "🟢 数据感知与检索",
+        "en": "🟢 Data Fetcher",
+        "contract_zh": "外部查询/URL ➡️ 只读结构化数据",
+        "contract_en": "External query/URL ➡️ read-only structured data",
+        "hint_zh": "上游节点,输出通常流转给 Transformer 处理",
+        "hint_en": "Upstream node; typically pipe output to a Transformer",
+    },
+    "content_transformer": {
+        "zh": "🔵 内容转化与处理",
+        "en": "🔵 Content Transformer",
+        "contract_zh": "输入数据/文件 ➡️ 转化后的数据/文件",
+        "contract_en": "Input data/file ➡️ transformed data/file",
+        "hint_zh": "纯本地变换,可多个串联",
+        "hint_en": "Pure local transform; chainable",
+    },
+    "multi_modal_generator": {
+        "zh": "🔥 多模态创作",
+        "en": "🔥 Multi-Modal Generator",
+        "contract_zh": "需求描述 ➡️ 生成的资产(图/音/视/代码)",
+        "contract_en": "Requirement spec ➡️ generated asset (image/audio/video/code)",
+        "hint_zh": "算力密集,生成全新资产",
+        "hint_en": "Compute-intensive; produces fresh assets",
+    },
+    "action_executor": {
+        "zh": "⚡ 动作执行与控制",
+        "en": "⚡ Action Executor",
+        "contract_zh": "配置/命令 ➡️ 外部系统状态变更",
+        "contract_en": "Config/command ➡️ external state change",
+        "hint_zh": "危险操作,前置需 dry-run/confirm",
+        "hint_en": "State-changing; dry-run/confirm advised",
+    },
+    "integration_utility": {
+        "zh": "🛠 跨组件集成工具",
+        "en": "🛠 Integration Utility",
+        "contract_zh": "上下游 skill I/O ➡️ 路由/桥接/中间件",
+        "contract_en": "Upstream/downstream skill I/O ➡️ routing/bridge/middleware",
+        "hint_zh": "连接其它 skill 的胶水,常做前置/路由",
+        "hint_en": "Glue between skills; often prereq/router",
+    },
+    "native_infra": {  # 隔离区
+        "zh": "🚫 系统原生基建(隔离)",
+        "en": "🚫 Native Infrastructure (isolated)",
+        "contract_zh": "OS/IDE 内置能力",
+        "contract_en": "OS/IDE built-in capability",
+        "hint_zh": "不参与业务 skill 编排",
+        "hint_en": "Not part of business skill orchestration",
+    },
+}
+
+
+def mece_label(key: str, lang: str = "zh") -> str:
+    """category key → 双语标签(如 '🟢 数据感知与检索' / '🟢 Data Fetcher')。"""
+    entry = _MECE_CATEGORIES.get(key) or _MECE_CATEGORIES["integration_utility"]
+    return entry[lang] if lang in ("zh", "en") else entry["zh"]
+
+
+def mece_contract(key: str, lang: str = "zh") -> str:
+    entry = _MECE_CATEGORIES.get(key) or _MECE_CATEGORIES["integration_utility"]
+    return entry[f"contract_{lang}"] if f"contract_{lang}" in entry else entry["contract_zh"]
+
+
+def mece_hint(key: str, lang: str = "zh") -> str:
+    entry = _MECE_CATEGORIES.get(key) or _MECE_CATEGORIES["integration_utility"]
+    return entry[f"hint_{lang}"] if f"hint_{lang}" in entry else entry["hint_zh"]
+
+
+# MECE 分类规则:name/description 中命中关键词 → 对应类
+# 顺序 = 优先级(强特征在前,泛特征在后)。默认落 integration_utility。
+_MECE_RULES = [
+    # 分类采用 name==X 精确匹配 skill 名 + 少量安全的语义关键词
+    # 顺序 = 优先级(隔离区先剥离,然后 Executor/Generator/Transformer/Fetcher,最后 Utility 兜底)
+
+    # 1) 🚫 系统原生基建 → 隔离区
+    ("native_infra", ["name==screenshot"]),
+
+    # 2) ⚡ Action_Executor(改变外部状态的写操作)
+    ("action_executor", [
+        # 部署平台
+        "name==vercel-deploy", "name==netlify-deploy",
+        "name==cloudflare-deploy", "name==render-deploy",
+        # GitHub PR/CI 写操作
+        "name==yeet", "name==gh-address-comments", "name==gh-fix-ci",
+        # issue tracker 写
+        "name==linear",
+        # Notion 写页面
+        "name==notion-knowledge-capture", "name==notion-spec-to-implementation",
+        # Figma 写文件
+        "name==figma-create-new-file", "name==figma-use",
+        "name==figma-generate-design", "name==figma-generate-library",
+        # 系统配置 patch / 迁移 / 删除
+        "name==enable-1m-context", "name==migrate-to-codex",
+        "name==codex-sessions-manager",
+        # Letta fleet 写操作
+        "name==letta-fleet-management",
+    ]),
+
+    # 3) 🔥 Multi_Modal_Generator(算力生成新资产)
+    ("multi_modal_generator", [
+        "name==asset-forge", "name==hatch-pet", "name==speech",
+        "name==drawio", "name==frontend-design", "name==pixel2motion",
+        "name==notion-meeting-intelligence", "name==jupyter-notebook",
+    ]),
+
+    # 4) 🔵 Content_Transformer(纯本地数据 → 数据转换)
+    ("content_transformer", [
+        "name==markitdown-convert", "name==transcribe", "name==pdf",
+        "name==knight-imagetopptx-skill", "name==security-threat-model",
+        "name==impeccable", "name==redesign-existing-projects",
+        "name==figma-implement-design", "name==figma-code-connect-components",
+        "name==kami",
+        # GSAP 系列:输入需求 → 输出代码片段
+        "name==gsap-core", "name==gsap-scrolltrigger", "name==gsap-timeline",
+        "name==gsap-react", "name==gsap-frameworks", "name==gsap-plugins",
+        "name==gsap-performance", "name==gsap-utils",
+    ]),
+
+    # 5) 🟢 Data_Fetcher(只读外部)
+    ("data_fetcher", [
+        "name==figma",  # Figma MCP 主要是 read
+        "name==sentry",  # 只读 Sentry
+        "name==openai-docs",
+        "name==navigating-chatgpt-history",
+        "name==security-ownership-map",
+        "name==notion-research-documentation",
+    ]),
+
+    # 6) 🛠 兜底 Integration_Utility
+    # 未在上面命中的一律归 utility(skillforge/letta-*/karpathy/define-goal/
+    # chatgpt-apps/cli-creator/aspnet/winui/playwright/design-taste-frontend/
+    # my-compact/creating-letta-code-channels/media-ai-routing/importing-chatgpt-memory/
+    # letta-filesystem-to-memfs/letta-configuration/letta-development-guide/
+    # compaction-prompts/security-best-practices/figma-create-design-system-rules 等)
+]
+
+
+def _match_mece_rule(text: str, name: str) -> str:
+    """按 _MECE_RULES 顺序匹配。返回 key,默认 'integration_utility'。"""
+    tl = text.lower()
+    nl = name.lower()
+    for key, kws in _MECE_RULES:
+        for kw in kws:
+            if kw.startswith("name=="):
+                if nl == kw[6:]:
+                    return key
+            elif kw in tl:
+                return key
+    return "integration_utility"
+
+
+def mece_category(meta: dict) -> str:
+    """根据 name + description 推断 MECE 5+1 类别 key。"""
+    text = (meta.get("name", "") + " " + (meta.get("description") or "")).strip()
+    return _match_mece_rule(text, meta.get("name", ""))
+
+
+def mece_category_cached(name: str, meta: dict) -> str:
+    """带缓存版本(md5 sig 失效)。"""
+    import hashlib
+    cache = _categories_cache_load()
+    sig = hashlib.md5(((meta.get("description") or "") + name + "v9-mece").encode("utf-8")).hexdigest()[:12]
+    entry = cache.get(name)
+    if entry and entry.get("sig") == sig and "mece" in entry:
+        return entry["mece"]
+    key = mece_category(meta)
+    cache[name] = {"sig": sig, "mece": key,
+                   "category": entry.get("category") if entry else None}
+    _categories_cache_save(cache)
+    return key
+
+
+# ---- 兼容旧接口:skill_category 仍可用,返回 MECE label(zh) ----
+# 老的 27 类 _CATEGORY_RULES 已删除,skill_category 现在返回 MECE 标签。
+# ============================================================================
+# (旧 27 类分类规则,v9 已弃用)
+# ============================================================================
+# 注:v8 的 _CATEGORY_RULES / _category_for_text / categorize_skill 保留在下面
+# 作为 fallback,防止老 slash 模板/外部调用触发。新代码统一走 mece_*。
 _CATEGORY_RULES = [
     # 顺序原则:特征独占的强匹配在前,泛词类在后
     # 1) Letta 系列(8+ 个独立 skill)
@@ -1508,23 +1708,30 @@ def generate_catalog(out_path=None) -> Path:
     out.parent.mkdir(parents=True, exist_ok=True)
 
     now = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    lines = [
-        "# SkillForge 本地技能目录",
-        "",
-        f"> 自动生成于 {now} · 74+ 个已装 skill 按 27 类分段 · **不要手工编辑**(每次 install/uninstall/modify 都会重写)",
-        "",
-        f"🟢 普通 **{len(regular)}** · 🟡 已定制 **{len(custom)}** · ⚪ 被遮蔽 **{len(shadowed)}** · 合计 **{len(skills)}**",
-        "",
-        "---",
-        "",
-    ]
+    # 支持双语标签(默认 zh,可通过 lang 参数或 SKILLFORGE_LANG env 覆盖)
+    lang = out_path if False else "zh"  # placeholder
+    lang_env = os.environ.get("SKILLFORGE_LANG", "").lower()
+    if lang_env in ("zh", "en"):
+        lang = lang_env
+    else:
+        lang = detect_lang()
 
-    # 按 category 分组
+    header = {
+        "zh": ("# SkillForge 本地技能目录",
+               f"> 自动生成于 {now} · 按 MECE 5+1 分类 · **不要手工编辑**(每次 install/uninstall/modify 都会重写)",
+               f"🟢 普通 **{len(regular)}** · 🟡 已定制 **{len(custom)}** · ⚪ 被遮蔽 **{len(shadowed)}** · 合计 **{len(skills)}**"),
+        "en": ("# SkillForge Local Skill Catalog",
+               f"> Auto-generated at {now} · MECE 5+1 classification · **Do not edit**(rewritten on each install/uninstall/modify)",
+               f"🟢 Regular **{len(regular)}** · 🟡 Customized **{len(custom)}** · ⚪ Shadowed **{len(shadowed)}** · Total **{len(skills)}**"),
+    }[lang]
+    lines = [header[0], "", header[1], "", header[2], "", "---", ""]
+
+    # 按 MECE 5+1 分组
     from collections import defaultdict
-    by_cat = defaultdict(list)
+    by_mece = defaultdict(list)
     for s in regular:
-        cat = skill_category(s.name, {"name": s.name, "description": s.description})
-        by_cat[cat].append(s)
+        key = mece_category_cached(s.name, {"name": s.name, "description": s.description})
+        by_mece[key].append(s)
 
     def _render_one(s, customized=False):
         marker = "✨ " if customized else ""
@@ -1534,7 +1741,6 @@ def generate_catalog(out_path=None) -> Path:
         if (ver_root / "previous").exists(): version_bits.append("🟡")
         version_bits.append("🔵")
         ver_short = "".join(version_bits)
-        # 单行 skill 头 + 分段引用 description
         return [
             f"#### {marker}{s.name}  <sub>{ver_short}</sub>",
             "",
@@ -1542,18 +1748,33 @@ def generate_catalog(out_path=None) -> Path:
             "",
         ]
 
-    # 分类分段(段内按 specificity+usage+name 排,和 list 命令一致)
-    for cat in sorted(by_cat, key=lambda c: (-len(by_cat[c]), c)):
-        members = _sort_by_priority(by_cat[cat])
-        lines.append(f"## {cat}  ({len(members)})")
+    # MECE 5 类按固定顺序输出(先业务后隔离)
+    mece_order = ["data_fetcher", "content_transformer", "multi_modal_generator",
+                  "action_executor", "integration_utility", "native_infra"]
+    for key in mece_order:
+        members = by_mece.get(key, [])
+        if not members:
+            continue
+        label = mece_label(key, lang)
+        contract = mece_contract(key, lang)
+        hint = mece_hint(key, lang)
+        lines.append(f"## {label}  ({len(members)})")
         lines.append("")
+        # 类头显示"数据契约 / 编排建议"元信息
+        if lang == "zh":
+            lines.append(f"> **数据契约**:{contract}  ·  **编排建议**:{hint}")
+        else:
+            lines.append(f"> **Data contract**: {contract}  ·  **Orchestration hint**: {hint}")
+        lines.append("")
+        members = _sort_by_priority(members)
         for s in members:
             lines.extend(_render_one(s, customized=False))
         lines.append("---")
         lines.append("")
 
     if custom:
-        lines.append(f"## 🟡 已定制(改过源码)  ({len(custom)})")
+        title = "## 🟡 已定制(改过源码)" if lang == "zh" else "## 🟡 Customized (modified source)"
+        lines.append(f"{title}  ({len(custom)})")
         lines.append("")
         for s in _sort_by_priority(custom):
             lines.extend(_render_one(s, customized=True))
@@ -1561,7 +1782,8 @@ def generate_catalog(out_path=None) -> Path:
         lines.append("")
 
     if shadowed:
-        lines.append(f"## ⚪ 被遮蔽副本  ({len(shadowed)})")
+        title = "## ⚪ 被遮蔽副本" if lang == "zh" else "## ⚪ Shadowed duplicates"
+        lines.append(f"{title}  ({len(shadowed)})")
         lines.append("")
         for s in shadowed:
             lines.append(f"- ✕ **{s.name}** — `{s.path}`")
@@ -1601,15 +1823,18 @@ def cmd_list(args):
     for s in skills:
         (custom if _is_customized(s.name) else regular).append(s)
 
-    # 给 regular 按 category 分组
+    # 语言:CLI --lang 优先,auto 走自动检测
+    raw = getattr(args, "lang", None) or "auto"
+    lang = detect_lang() if raw == "auto" else raw
+
+    # 给 regular 按 MECE 5+1 分组
     from collections import defaultdict
-    by_cat = defaultdict(list)
+    by_mece = defaultdict(list)
     for s in regular:
-        cat = skill_category(s.name, {"name": s.name, "description": s.description})
-        by_cat[cat].append(s)
-    # 段内按 specificity / usage / name 排
-    for cat in by_cat:
-        by_cat[cat] = _sort_by_priority(by_cat[cat])
+        key = mece_category_cached(s.name, {"name": s.name, "description": s.description})
+        by_mece[key].append(s)
+    for key in by_mece:
+        by_mece[key] = _sort_by_priority(by_mece[key])
 
     def _print_desc(desc: str, mode: str):
         if not desc:
@@ -1634,24 +1859,33 @@ def cmd_list(args):
     mapping = {}
     n = 1
     total_reg = len(regular)
-    total_cat = len(by_cat)
+
+    # 双语头部
+    head_zh = f"🟢 已装技能  {total_reg} 个,按 MECE 5+1 分类"
+    head_en = f"🟢 Installed skills  {total_reg}  ·  MECE 5+1 classification"
+    print((head_zh if lang == "zh" else head_en) + "\n")
 
     # ---- 输出:分类分段 / --flat 字母序 ----
     if args.flat:
-        print(f"🟢 已装技能  {total_reg} 个(字母序)\n")
         for s in sorted(regular, key=lambda x: x.name.lower()):
             mapping[n] = s.name
             print(f"  [{n:>3}] {s.name}")
             _print_desc(s.description, desc_mode)
             n += 1
     else:
-        print(f"🟢 已装技能  {total_reg} 个,分 {total_cat} 类:\n")
-        # 段排序:成员数多的在前
-        for cat in sorted(by_cat, key=lambda c: (-len(by_cat[c]), c)):
-            members = by_cat[cat]
-            if args.cat and args.cat.lower() not in cat.lower():
+        # MECE 5 类固定顺序
+        mece_order = ["data_fetcher", "content_transformer", "multi_modal_generator",
+                      "action_executor", "integration_utility", "native_infra"]
+        for key in mece_order:
+            members = by_mece.get(key, [])
+            if not members:
                 continue
-            print(f"━━━ {cat}  ({len(members)}) ━━━")
+            label = mece_label(key, lang)
+            if args.cat and args.cat.lower() not in label.lower() and args.cat.lower() not in key:
+                continue
+            contract = mece_contract(key, lang)
+            print(f"━━━ {label}  ({len(members)}) ━━━")
+            print(f"    ↳ {contract}")
             for s in members:
                 mapping[n] = s.name
                 print(f"  [{n:>3}] {s.name}")
@@ -1660,7 +1894,9 @@ def cmd_list(args):
             print()
 
     if custom:
-        print(f"━━━ 🟡 已定制(改过源码)  ({len(custom)}) ━━━")
+        title_zh = "━━━ 🟡 已定制(改过源码) "
+        title_en = "━━━ 🟡 Customized (modified source) "
+        print(f"{title_zh if lang == 'zh' else title_en} ({len(custom)}) ━━━")
         for s in _sort_by_priority(custom):
             mapping[n] = s.name
             print(f"  [{n:>3}] ✨ {s.name}")
@@ -1671,10 +1907,14 @@ def cmd_list(args):
         print()
 
     if shadowed:
-        print(f"━━━ ⚪ 被遮蔽副本  ({len(shadowed)}) ━━━")
+        title_zh = "━━━ ⚪ 被遮蔽副本 "
+        title_en = "━━━ ⚪ Shadowed duplicates "
+        print(f"{title_zh if lang == 'zh' else title_en} ({len(shadowed)}) ━━━")
         for s in shadowed:
             print(f"  ✕ {s.name}   {s.path}")
-        print("  可 `skillforge consolidate` 合并到 SKILLFORGE_HOME 后用软链统一。")
+        tip_zh = "  可 `skillforge consolidate` 合并到 SKILLFORGE_HOME 后用软链统一。"
+        tip_en = "  Use `skillforge consolidate` to unify duplicates via symlinks to SKILLFORGE_HOME."
+        print(tip_zh if lang == "zh" else tip_en)
         print()
 
     save_last_list(mapping)
@@ -2017,30 +2257,42 @@ def cmd_suggest(args):
             print("   ⚠️ 中文 query + 无 ANTHROPIC_API_KEY → 关键词法必败")
             print("   先试英文 query,或 export ANTHROPIC_API_KEY 后让 LLM 做语义匹配")
         print(f'   去 GitHub 找新的:`skillforge find "{query}"`')
-        # 仍可选展示分类菜单(供用户漫游)
         if not args.no_browse:
-            print(f"\n   或浏览已装的分类:`skillforge list`(74 个分 27 类)")
+            print(f"\n   或浏览已装的分类:`skillforge list`(按 MECE 5+1 分类)")
         return
 
     print(f"\n🎯 「{query}」 → 本地 Top {len(top)} (没去 GitHub,只看已装)\n")
 
-    # 4) 输出表格(借鉴 Codex profile 推荐排序输出格式)
-    print("| Rank | Skill | 推荐级别 | 匹配度 | 适合场景 | 不适合场景 |")
-    print("|------|-------|----------|--------|----------|------------|")
+    # 4) 输出表格(MECE 分类 + 双语)
+    lang = detect_lang(query)
+    if lang == "zh":
+        print("| Rank | Skill | MECE 类 | 推荐级别 | 匹配度 | 适合场景 | 不适合场景 |")
+        print("|------|-------|---------|----------|--------|----------|------------|")
+        level_map = {"强推": "强推", "推荐": "推荐", "谨慎": "谨慎", "参考": "参考"}
+    else:
+        print("| Rank | Skill | MECE class | Level | Score | Fits | Avoid |")
+        print("|------|-------|------------|-------|-------|------|-------|")
+        level_map = {"强推": "STRONG", "推荐": "RECOMMEND", "谨慎": "CAUTION", "参考": "REFERENCE"}
     for i, (s, composite, base, spec, usage) in enumerate(top, 1):
-        cat = skill_category(s.name, {"name": s.name, "description": s.description})
-        # 推荐级别:0.7+ 强推,0.5+ 推荐,0.3+ 谨慎,余下 仅参考
-        if composite >= 0.7: level = "强推"
-        elif composite >= 0.5: level = "推荐"
-        elif composite >= 0.3: level = "谨慎"
-        else: level = "参考"
-        # 从 description 抠"Use when..." 段
+        mkey = mece_category_cached(s.name, {"name": s.name, "description": s.description})
+        mtag = mece_label(mkey, lang)
+        if composite >= 0.7: lvl_key = "强推"
+        elif composite >= 0.5: lvl_key = "推荐"
+        elif composite >= 0.3: lvl_key = "谨慎"
+        else: lvl_key = "参考"
+        level = level_map[lvl_key]
         suit = _extract_clause(s.description, [r"Use when ([^.。\n]+)", r"使用[场]?景[:: ]([^.。\n]+)"])
         not_suit = _extract_clause(s.description, [r"Do not use (?:for |when )([^.。\n]+)", r"don't use ([^.。\n]+)", r"不[适]?用[于:: ]([^.。\n]+)"])
-        print(f"| {i} | **{s.name}** ({cat}) | {level} | base={base:.2f} spec={spec:.2f} usage={usage:.2f} → **{composite:.2f}** | {suit or '(看描述)'} | {not_suit or '(无明确反例)'} |")
+        suit_str = suit or ("(看描述)" if lang == "zh" else "(see desc)")
+        not_suit_str = not_suit or ("(无明确反例)" if lang == "zh" else "(no explicit counter-case)")
+        print(f"| {i} | **{s.name}** ({mtag}) | {mtag} | {level} | base={base:.2f} spec={spec:.2f} usage={usage:.2f} → **{composite:.2f}** | {suit_str} | {not_suit_str} |")
 
-    print(f"\n💡 用法:`skillforge detail {top[0][0].name}` 看详情 / `skillforge intro {top[0][0].name}` 看简介")
-    print(f"   都不合适?去 GitHub 找:`skillforge find \"{query}\"`")
+    if lang == "zh":
+        print(f"\n💡 用法:`skillforge detail {top[0][0].name}` 看详情 / `skillforge intro {top[0][0].name}` 看简介")
+        print(f"   都不合适?去 GitHub 找:`skillforge find \"{query}\"`")
+    else:
+        print(f"\n💡 Usage: `skillforge detail {top[0][0].name}` for details / `skillforge intro {top[0][0].name}` for a summary")
+        print(f"   None fits? Find new on GitHub: `skillforge find \"{query}\"`")
 
 
 def _extract_clause(desc: str, patterns: list) -> str:
@@ -3234,17 +3486,24 @@ def build_parser():
     p = argparse.ArgumentParser(prog="skillforge", description="跨 agent 技能闭环管理")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    pl = sub.add_parser("list", help="列出已装技能(默认按 category 分段,specificity+usage+name 三轴排序)")
+    pl = sub.add_parser("list", help="列出已装技能(默认按 MECE 5+1 分类,双语)")
     pl.add_argument("--json", action="store_true")
     pl.add_argument("--brief", action="store_true", help="每条 120 字符简介(防输出过大)")
     pl.add_argument("--full", action="store_true", help="每条完整 description 折行(适合细看)")
     pl.add_argument("--flat", action="store_true", help="不分类,纯字母序")
-    pl.add_argument("--cat", help="只看某分类(如 --cat 部署,模糊匹配)")
+    pl.add_argument("--cat", help="只看某分类(如 --cat executor 或 --cat 数据 模糊匹配)")
+    pl.add_argument("--lang", choices=["zh", "en", "auto"], default="auto",
+                    help="输出语言(zh/en/auto,auto 会看 CJK/LANG env)")
     pl.set_defaults(func=cmd_list)
 
-    pcat = sub.add_parser("catalog", help="手动重生成 ~/.skillforge/CATALOG.md")
+    pcat = sub.add_parser("catalog", help="手动重生成 CATALOG.md")
     pcat.add_argument("--path", help="覆盖输出位置")
-    pcat.set_defaults(func=lambda a: print(f"📜 写入 {generate_catalog(a.path)}"))
+    pcat.add_argument("--lang", choices=["zh", "en"], help="输出语言(默认按 SKILLFORGE_LANG env 或 LANG)")
+    def _do_catalog(a):
+        if a.lang:
+            os.environ["SKILLFORGE_LANG"] = a.lang
+        print(f"📜 写入 {generate_catalog(a.path)}")
+    pcat.set_defaults(func=_do_catalog)
 
     pw = sub.add_parser("which", help="查本地有没有能满足需求的技能")
     pw.add_argument("query", nargs="+")

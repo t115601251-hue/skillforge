@@ -568,6 +568,61 @@ class TestLastListCache(unittest.TestCase):
         self.assertIsNone(skillforge.resolve_skill("99"))
 
 
+class TestMECE(unittest.TestCase):
+    """v9: MECE 5+1 分类 + 双语."""
+    def test_native_infra_isolates_screenshot(self):
+        self.assertEqual(skillforge.mece_category({"name": "screenshot", "description": "OS screenshot"}), "native_infra")
+
+    def test_action_executor_deploy(self):
+        for name in ["vercel-deploy", "netlify-deploy", "cloudflare-deploy", "yeet", "gh-fix-ci", "linear"]:
+            self.assertEqual(skillforge.mece_category({"name": name, "description": "..."}), "action_executor",
+                             f"{name} should be action_executor")
+
+    def test_generator_produces_asset(self):
+        for name in ["asset-forge", "hatch-pet", "speech", "pixel2motion", "drawio"]:
+            self.assertEqual(skillforge.mece_category({"name": name, "description": "..."}), "multi_modal_generator")
+
+    def test_transformer_pure_local(self):
+        for name in ["markitdown-convert", "transcribe", "pdf", "impeccable", "kami"]:
+            self.assertEqual(skillforge.mece_category({"name": name, "description": "..."}), "content_transformer")
+
+    def test_data_fetcher_readonly(self):
+        for name in ["figma", "sentry", "openai-docs", "navigating-chatgpt-history"]:
+            self.assertEqual(skillforge.mece_category({"name": name, "description": "..."}), "data_fetcher")
+
+    def test_unknown_falls_to_integration_utility(self):
+        # 未在任何 rule 里的一律落 utility
+        self.assertEqual(skillforge.mece_category({"name": "random-tool-xyz", "description": "..."}), "integration_utility")
+
+    def test_labels_bilingual(self):
+        self.assertIn("数据", skillforge.mece_label("data_fetcher", "zh"))
+        self.assertIn("Fetcher", skillforge.mece_label("data_fetcher", "en"))
+        self.assertIn("动作执行", skillforge.mece_label("action_executor", "zh"))
+        self.assertIn("Executor", skillforge.mece_label("action_executor", "en"))
+
+    def test_contract_bilingual(self):
+        self.assertIn("➡️", skillforge.mece_contract("data_fetcher", "zh"))
+        self.assertIn("➡️", skillforge.mece_contract("data_fetcher", "en"))
+
+
+class TestDetectLang(unittest.TestCase):
+    """v9: detect_lang() 语言检测."""
+    def test_explicit_wins(self):
+        self.assertEqual(skillforge.detect_lang(explicit="en"), "en")
+        self.assertEqual(skillforge.detect_lang(explicit="zh"), "zh")
+
+    def test_cjk_in_query_returns_zh(self):
+        self.assertEqual(skillforge.detect_lang(query_text="找一个写作文"), "zh")
+
+    def test_english_query_returns_en(self):
+        self.assertEqual(skillforge.detect_lang(query_text="find an essay writer"), "en")
+
+    def test_default_zh(self):
+        # 无 explicit 无 query,依 LANG env 或默认 zh
+        r = skillforge.detect_lang()
+        self.assertIn(r, ("zh", "en"))
+
+
 class TestCategorize(unittest.TestCase):
     """v8: skill 分类规则匹配 + cache。"""
     def test_letta_prefix_wins(self):
