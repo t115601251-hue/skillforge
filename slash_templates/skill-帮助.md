@@ -17,6 +17,7 @@ description: 列出所有 /skill-* 命令的用法
   /skill-回滚 <name>          上一版 swap;--pristine 回 github 原版
   /skill-卸载 <name>          删软链 + 搬 backups
   /skill-介绍 <name>          agent 用自己的模型写一段简短中文说明
+  /skill-创建 <需求>          从零造一个新 skill (v9.7,参考 Anthropic skill-creator)
   /skill-收藏 <编号|name>     ⭐ 收藏 (v9.6,本地存,catalog 里前缀 ⭐)
   /skill-取消收藏 <编号|name> 去掉 ⭐
   /skill-帮助                本表
@@ -24,7 +25,7 @@ description: 列出所有 /skill-* 命令的用法
 ASCII 别名(同一命令,自动补全下拉框搜得到):
   /skill-find /skill-suggest /skill-list /skill-info /skill-install
   /skill-modify /skill-rollback /skill-uninstall /skill-intro /skill-help
-  /skill-favorite /skill-unfavorite
+  /skill-favorite /skill-unfavorite /skill-create
 
 图标含义(catalog 里):
   🏠  本工具自身 (skillforge)

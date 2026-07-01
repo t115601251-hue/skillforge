@@ -812,6 +812,84 @@ class TestFavorites(unittest.TestCase):
         self.assertIn("kami", raw["favorites"])
 
 
+class TestCreate(unittest.TestCase):
+    """v9.7: cmd_create 落盘 + pristine + register + catalog 刷新."""
+
+    def setUp(self):
+        import tempfile, pathlib
+        self._tmpdir = tempfile.mkdtemp()
+        self._orig_home = skillforge.CANONICAL_HOME
+        self._orig_versions = skillforge.SKILLFORGE_VERSIONS
+        skillforge.CANONICAL_HOME = str(pathlib.Path(self._tmpdir) / "skills")
+        skillforge.SKILLFORGE_VERSIONS = str(pathlib.Path(self._tmpdir) / "versions")
+
+    def tearDown(self):
+        # 清理泄漏到 3 家真实 agent 目录的软链(test 里 register_skill 会真的写)
+        import shutil, pathlib
+        leaked_names = ["smoke-test-skill", "dupe", "no-md", "no-fm", "no-desc"]
+        agent_bases = [
+            pathlib.Path("~/.claude/skills").expanduser(),
+            pathlib.Path("~/.codex/skills").expanduser(),
+            pathlib.Path("~/.openclaw/skills").expanduser(),
+        ]
+        for base in agent_bases:
+            for n in leaked_names:
+                p = base / n
+                if p.exists() or p.is_symlink():
+                    shutil.rmtree(p, ignore_errors=True)
+                    try: p.unlink()
+                    except: pass
+        skillforge.CANONICAL_HOME = self._orig_home
+        skillforge.SKILLFORGE_VERSIONS = self._orig_versions
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _run(self, draft):
+        import json, tempfile, pathlib
+        from argparse import Namespace
+        p = pathlib.Path(self._tmpdir) / "draft.json"
+        p.write_text(json.dumps(draft, ensure_ascii=False), encoding="utf-8")
+        skillforge.cmd_create(Namespace(file=str(p)))
+
+    def test_valid_draft_creates_files(self):
+        import pathlib
+        draft = {
+            "name": "smoke-test-skill",
+            "files": {
+                "SKILL.md": "---\nname: smoke-test-skill\ndescription: A smoke test skill\n---\n\n# Smoke\n",
+                "references/notes.md": "some notes\n",
+            }
+        }
+        self._run(draft)
+        # 两个文件都落盘
+        base = pathlib.Path(skillforge.CANONICAL_HOME).expanduser() / "smoke-test-skill"
+        self.assertTrue((base / "SKILL.md").exists())
+        self.assertTrue((base / "references" / "notes.md").exists())
+        # pristine 快照存在
+        pristine = pathlib.Path(skillforge.SKILLFORGE_VERSIONS).expanduser() / "smoke-test-skill" / "pristine" / "SKILL.md"
+        self.assertTrue(pristine.exists())
+
+    def test_reject_duplicate_name(self):
+        import pathlib
+        draft = {"name": "dupe", "files": {"SKILL.md": "---\nname: dupe\ndescription: x\n---\n"}}
+        self._run(draft)
+        with self.assertRaises(SystemExit):
+            self._run(draft)  # 第二次应拒
+
+    def test_reject_missing_skill_md(self):
+        with self.assertRaises(SystemExit):
+            self._run({"name": "no-md", "files": {"other.md": "..."}})
+
+    def test_reject_bad_frontmatter(self):
+        # SKILL.md 不以 --- 开头
+        with self.assertRaises(SystemExit):
+            self._run({"name": "no-fm", "files": {"SKILL.md": "just text no frontmatter"}})
+
+    def test_reject_missing_name_or_desc_in_frontmatter(self):
+        # frontmatter 缺 description
+        with self.assertRaises(SystemExit):
+            self._run({"name": "no-desc", "files": {"SKILL.md": "---\nname: no-desc\n---\n\n# body\n"}})
+
+
 class TestCatalogPrefixes(unittest.TestCase):
     """v9.6: catalog 里 🏠 / ⭐ 前缀。"""
 

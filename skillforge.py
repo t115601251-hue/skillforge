@@ -2242,6 +2242,97 @@ def cmd_which(args):
     return False
 
 
+def cmd_create(args):
+    """create --file <draft.json>: 无脑落盘 agent 起草的 skill,自动装到 3 家 agent。
+
+    draft.json 格式(参考 modify-apply):
+    {
+      "name": "my-skill",
+      "files": {
+        "SKILL.md": "---\\nname: my-skill\\ndescription: ...\\n---\\n\\n# ...",
+        "scripts/foo.py": "#!/usr/bin/env python...",       # optional
+        "references/spec.md": "...",                         # optional
+        "assets/logo.svg": "<svg>..."                        # optional
+      }
+    }
+
+    副作用:
+    - 写到 SKILLFORGE_HOME/<name>/
+    - symlink 到 3 家 agent skills/
+    - 立即写 pristine 快照(第一次创建版本 = 原始版)
+    - 刷新 CATALOG.md
+    """
+    cfile = Path(args.file)
+    if not cfile.exists():
+        print(f"❌ draft 文件不存在: {cfile}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        draft = json.loads(cfile.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"❌ draft JSON 解析失败: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    name = (draft.get("name") or "").strip()
+    files = draft.get("files") or {}
+    if not name or not files:
+        print("❌ draft 缺 name 或 files", file=sys.stderr)
+        sys.exit(1)
+    if "SKILL.md" not in files:
+        print("❌ files 里必须有 SKILL.md (skill 的必备文件)", file=sys.stderr)
+        sys.exit(1)
+    # 检查 SKILL.md 至少有 frontmatter + name/description
+    skill_md = files["SKILL.md"]
+    if not skill_md.startswith("---"):
+        print("❌ SKILL.md 必须以 --- 开头 (YAML frontmatter)", file=sys.stderr)
+        sys.exit(1)
+    if "name:" not in skill_md[:500] or "description:" not in skill_md[:2000]:
+        print("❌ SKILL.md frontmatter 缺 name: 或 description: 字段", file=sys.stderr)
+        sys.exit(1)
+
+    # 目标目录
+    skill_dir = Path(CANONICAL_HOME).expanduser() / name
+    if skill_dir.exists():
+        print(f"❌ skill '{name}' 已存在:{skill_dir}", file=sys.stderr)
+        print(f"   想改就用 /skill-修改 {name} <需求>;想覆盖先 /skill-卸载 {name}", file=sys.stderr)
+        sys.exit(1)
+
+    # 落盘
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    written = []
+    for rel_path, content in files.items():
+        dst = skill_dir / rel_path
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text(content, encoding="utf-8")
+        written.append(rel_path)
+
+    print(f"✨ 已创建 {name},{len(written)} 个文件:")
+    for p in written:
+        print(f"   · {p}")
+
+    # 写 pristine 快照(这个版本 = 原始版本,可回滚点)
+    try:
+        save_pristine(name, skill_dir)
+        print(f"💾 pristine 快照 → versions/{name}/pristine/")
+    except Exception as e:
+        print(f"   ⚠ pristine 快照失败: {e}", file=sys.stderr)
+
+    # symlink 到 3 家 agent
+    results = register_skill(skill_dir, link=True)
+    for tgt, how in results:
+        print(f"🔗 注册 {tgt}  ({how})")
+
+    # 刷新 CATALOG
+    try:
+        generate_catalog()
+    except Exception:
+        pass
+
+    print(f"\n✅ {name} 已装到所有 agent。")
+    print(f"   使用: 跟 agent 说匹配 description 触发词的话即可")
+    print(f"   改: /skill-修改 {name} <怎么改>")
+    print(f"   卸: /skill-卸载 {name}(数据搬 backups/ 不丢)")
+
+
 def cmd_favorite(args):
     """favorite <name|编号>: 收藏一个已装 skill,catalog 里前缀 ⭐。"""
     name = resolve_skill(args.target)
@@ -2717,6 +2808,7 @@ def cmd_help(args):
   skillforge modify <name> <需求>  LLM 改源码,自动快照,显 diff,确认应用
   skillforge rollback <name> [--pristine]  回上一版或回 github 原版
   skillforge uninstall <name>      删软链 + 搬 backups
+  skillforge create --file <draft.json> 从 agent 起草的 draft 造一个新 skill (v9.7)
   skillforge favorite <编号|name>  ⭐ 收藏 (catalog 前缀加 ⭐)
   skillforge unfavorite <编号|name> 取消收藏
   skillforge favorite-list         列出所有 ⭐ 收藏
@@ -2784,7 +2876,7 @@ python {skillforge_path} <subcommand> [...]
 
 3. 用户提供 PAT 后,只写进本次会话的 env,**不写盘、不 commit、不横传**
 
-**不需要 token** 的路径:`list` / `catalog` / `intro` / `detail` / `suggest` / `rollback` / `uninstall` / `favorite` / `unfavorite` / `favorite-list`(纯本地操作)。
+**不需要 token** 的路径:`list` / `catalog` / `intro` / `detail` / `suggest` / `rollback` / `uninstall` / `favorite` / `unfavorite` / `favorite-list` / `create`(纯本地操作)。
 
 ## 何时用本技能
 
@@ -2810,6 +2902,7 @@ python {skillforge_path} <subcommand> [...]
 | /skill-回滚 <name> | /skill-rollback | `-skill回滚 <name>` | 回上一版 |
 | /skill-卸载 <name> | /skill-uninstall | `-skill卸载 <name>` | 卸载 |
 | /skill-介绍 <name> | /skill-intro | `-skill介绍 <name>` | 出一段简介 |
+| /skill-创建 <需求> | /skill-create | `-skill创建 <需求>` | 从零造一个新 skill(v9.7) |
 | /skill-收藏 <编号\|name> | /skill-favorite | `-skill收藏 <编号>` | ⭐ 加收藏 |
 | /skill-取消收藏 <编号\|name> | /skill-unfavorite | `-skill取消收藏 <编号>` | 去 ⭐ |
 | /skill-帮助 | /skill-help | `-skill帮助` | 命令表 |
@@ -2890,6 +2983,8 @@ def cmd_self_install(args):
         # v9.6: 收藏
         "skill-收藏.md": "skill-favorite.md",
         "skill-取消收藏.md": "skill-unfavorite.md",
+        # v9.7: 创建
+        "skill-创建.md": "skill-create.md",
     }
     print(f"\n📂 准备 {len(templates)} 个 slash 模板 + 各自的 ASCII 别名:")
     for t in templates:
@@ -3910,6 +4005,11 @@ def build_parser():
     pt.add_argument("action", choices=["list", "add", "remove"])
     pt.add_argument("items", nargs="*", help="owner 或 owner/repo,小写")
     pt.set_defaults(func=cmd_trust)
+
+    # v9.7: 创建
+    pcr = sub.add_parser("create", help="从 draft.json 无脑落盘新 skill (agent 起草)")
+    pcr.add_argument("--file", required=True, help="draft.json 路径 {name, files:{path→content}}")
+    pcr.set_defaults(func=cmd_create)
 
     # v9.6: 收藏
     pfa = sub.add_parser("favorite", help="收藏一个 skill,catalog 里前缀 ⭐")
