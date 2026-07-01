@@ -1102,7 +1102,9 @@ def _t_breakdown(m: dict, scorecard=None, osv_vulns=None) -> list:
     if m.get('archived'):
         return [('archived', 0, 100, '归档 → 直接 0')]
     items = []
-    items.append(('LICENSE',    20 if m.get('license') else 0, 20, str(m.get('license') or '无')[:20]))
+    lic = m.get('license')
+    lic_name = (lic.get('spdx_id') or lic.get('key') or 'yes') if isinstance(lic, dict) else (lic or '无')
+    items.append(('LICENSE',    20 if lic else 0, 20, str(lic_name)[:20]))
     items.append(('主分支名',   15 if m.get('default_branch') in {'main','master','develop'} else 0, 15, m.get('default_branch','?')))
     push_age = _age_days(m.get('pushed_at',''))
     items.append(('近期活跃',   15 if push_age <= 90 else 0, 15, f'{push_age}天前 push'))
