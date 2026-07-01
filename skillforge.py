@@ -462,8 +462,13 @@ def _friendly_gh_msg(code: int, path: str, token: str | None, body: str) -> str:
     if code == 403:
         if "rate limit" in body.lower() or "API rate limit" in body:
             if not token:
-                return "GitHub 匿名 rate limit 超出 (403)。设置一个有效的 GITHUB_TOKEN 把配额提到 5000/小时。"
-            return "GitHub rate limit 超出 (403)。等到 reset 窗口或换 token。"
+                return (
+                    "GitHub 匿名 rate limit 超出 (403,配额 60/小时)。三种解法:\n"
+                    "  A) 已装 gh CLI 且登录过: GITHUB_TOKEN=$(gh auth token) python skillforge.py ...\n"
+                    "  B) 手动生成 PAT: https://github.com/settings/tokens → classic → public_repo\n"
+                    "  C) 不联网只用本地: python skillforge.py suggest \"<需求>\""
+                )
+            return "GitHub rate limit 超出 (403,配额 5000/小时)。等到 reset 窗口或换新 token。"
         if "/user/starred/" in path:
             return (
                 "Star 失败 (403):token 缺少 starring 写权限。"

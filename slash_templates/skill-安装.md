@@ -6,6 +6,27 @@ description: 装一个 skill(可以是编号、name 或 owner/repo)
 
 ## 步骤
 
+**0. GitHub Token 检查(v9.4)**
+
+如果 $ARGUMENTS 是**编号**(纯数字,查已缓存的候选)可跳过 token 检查 —— skillforge install 从 last_list.json 拿完整 owner/repo,不需要重新联网。
+
+如果 $ARGUMENTS 是 **owner/repo 或 name**(第一次装/需要拉 README 生成 SKILL.md),要联网,先跑:
+`[ -n "$GITHUB_TOKEN" ] && echo HAS_ENV || echo NO_ENV`
+
+**若 NO_ENV 且 gh auth status 也无**,先向用户请求(不要偷偷扫凭据):
+
+```
+🔐 装 <target> 需要联网拉 README。请三选一给我 token:
+
+  A) 用 gh 里已登录的 token(推荐,说 "用 gh token" 即可)
+  B) 贴 PAT (github.com/settings/tokens, public_repo, 7 天过期)
+  C) 取消,不装
+```
+
+等用户回复再往下。
+
+---
+
 **1. 跑 install 命令**
 跑: `python {SKILLFORGE_PATH} install "$ARGUMENTS" --no-star`
 
