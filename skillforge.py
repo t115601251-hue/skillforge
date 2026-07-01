@@ -2717,9 +2717,12 @@ def cmd_help(args):
   skillforge modify <name> <需求>  LLM 改源码,自动快照,显 diff,确认应用
   skillforge rollback <name> [--pristine]  回上一版或回 github 原版
   skillforge uninstall <name>      删软链 + 搬 backups
+  skillforge favorite <编号|name>  ⭐ 收藏 (catalog 前缀加 ⭐)
+  skillforge unfavorite <编号|name> 取消收藏
+  skillforge favorite-list         列出所有 ⭐ 收藏
   skillforge trust list|add|remove <owner...>   信任白名单
   skillforge consolidate [--dry-run]  合并同名物理副本到 SKILLFORGE_HOME
-  skillforge self-install          装自身 SKILL.md + 9 个 slash 命令到所有 agent
+  skillforge self-install          装自身 SKILL.md + slash 命令到所有 agent
   skillforge help                  本帮助
 
 数据布局:
@@ -2807,6 +2810,8 @@ python {skillforge_path} <subcommand> [...]
 | /skill-回滚 <name> | /skill-rollback | `-skill回滚 <name>` | 回上一版 |
 | /skill-卸载 <name> | /skill-uninstall | `-skill卸载 <name>` | 卸载 |
 | /skill-介绍 <name> | /skill-intro | `-skill介绍 <name>` | 出一段简介 |
+| /skill-收藏 <编号\|name> | /skill-favorite | `-skill收藏 <编号>` | ⭐ 加收藏 |
+| /skill-取消收藏 <编号\|name> | /skill-unfavorite | `-skill取消收藏 <编号>` | 去 ⭐ |
 | /skill-帮助 | /skill-help | `-skill帮助` | 命令表 |
 
 ## 文本前缀路由(重要,v9.3.2 新)
