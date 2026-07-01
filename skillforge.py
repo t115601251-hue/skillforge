@@ -2591,6 +2591,22 @@ description: 跨 agent 技能闭环管理(查找/安装/列表/详情/修改/回
 python {skillforge_path} <subcommand> [...]
 ```
 
+## 前置要求(v9.4 强制)
+
+任何需要联网访问 GitHub 的子命令(`find` / `find-data` / `deep-data` / `install <owner/repo>`)前,agent 必须先做 **Token 检查**:
+
+1. 看 `GITHUB_TOKEN` 环境变量,或 `gh auth token` 是否返回 token
+2. 都无 → **明确向用户索取**(不要偷偷探测 credential store,Claude Code 沙箱会拦):
+
+   ```
+   🔐 联网访问 GitHub 需要 token(匿名配额 60/小时,一次 -skill查找 就打满)。
+      请给我一个 PAT,或告诉我"用 gh token"、"走 -skill建议"。
+   ```
+
+3. 用户提供 PAT 后,只写进本次会话的 env,**不写盘、不 commit、不横传**
+
+**不需要 token** 的路径:`list` / `catalog` / `intro` / `detail` / `suggest` / `rollback` / `uninstall`(纯本地操作)。
+
 ## 何时用本技能
 
 当用户说类似这些话时调用本技能:
