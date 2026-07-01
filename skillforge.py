@@ -1402,6 +1402,115 @@ def mece_hint(key: str, lang: str = "zh") -> str:
     return entry[f"hint_{lang}"] if f"hint_{lang}" in entry else entry["hint_zh"]
 
 
+# 每个 skill 的紧凑双语释义(≤25 字中文 / ≤12 words 英文)
+# 用户 v9.1 明确要求:/skill列表 输出「英文名 + 一句中文释义」紧凑格式,不再贴原描述长文
+# 未收录的 skill 走 brief_for 的 fallback(取原 description 首句截断)
+_BRIEF_TRANSLATIONS = {
+    # 🟢 Data Fetcher (6)
+    "figma": {"zh": "拉 Figma 设计上下文/截图/变量/资产", "en": "Fetch Figma design context, screenshots, variables, assets"},
+    "security-ownership-map": {"zh": "分析 git 仓库算安全所有权拓扑与 bus factor", "en": "Analyze git repo for security ownership topology and bus factor"},
+    "navigating-chatgpt-history": {"zh": "检索归档的 ChatGPT/Claude 会话导出", "en": "Navigate archived ChatGPT/Claude conversation exports"},
+    "notion-research-documentation": {"zh": "Notion 多源研究并合成带引用的文档", "en": "Research across Notion, synthesize cited documentation"},
+    "openai-docs": {"zh": "查 OpenAI 官方最新文档与模型选型", "en": "Query official OpenAI docs and model selection guidance"},
+    "sentry": {"zh": "只读查 Sentry issue/事件/生产错误", "en": "Read-only inspect Sentry issues, events, production errors"},
+
+    # 🔵 Content Transformer (18)
+    "knight-imagetopptx-skill": {"zh": "图片/PDF页/截图重建为可编辑 PPTX", "en": "Rebuild slide images / PDF pages into editable PPTX"},
+    "gsap-scrolltrigger": {"zh": "GSAP 滚动动画/pinning", "en": "GSAP ScrollTrigger — scroll-linked animation and pinning"},
+    "markitdown-convert": {"zh": "PDF/DOCX/PPTX/图片/音频/YouTube 转 Markdown", "en": "Convert PDF/DOCX/PPTX/image/audio/YouTube to Markdown"},
+    "security-threat-model": {"zh": "仓库级威胁建模,输出 Markdown", "en": "Repo-grounded threat modeling, writes Markdown model"},
+    "figma-code-connect-components": {"zh": "Figma 组件与代码组件做 Code Connect 映射", "en": "Map Figma components to code via Code Connect"},
+    "figma-implement-design": {"zh": "Figma 设计 1:1 转生产代码", "en": "Translate Figma designs into 1:1 production code"},
+    "gsap-core": {"zh": "GSAP 核心 API (tween/easing/stagger)", "en": "GSAP core API — tween/easing/stagger/matchMedia"},
+    "gsap-frameworks": {"zh": "GSAP 在 Vue/Svelte 等非 React 框架里的用法", "en": "GSAP for Vue, Svelte and non-React frameworks"},
+    "gsap-performance": {"zh": "GSAP 动画性能优化 (transform/避免抖动)", "en": "GSAP animation performance — transforms, avoid jank"},
+    "gsap-plugins": {"zh": "GSAP 插件集 (ScrollTo/Flip/Draggable/SplitText…)", "en": "GSAP plugins — ScrollTo/Flip/Draggable/SplitText etc"},
+    "gsap-react": {"zh": "GSAP 在 React/Next.js 里的用法 (useGSAP)", "en": "GSAP for React/Next.js — useGSAP hook and cleanup"},
+    "gsap-timeline": {"zh": "GSAP 时间线编排/关键帧序列", "en": "GSAP timelines — sequencing and keyframe choreography"},
+    "gsap-utils": {"zh": "gsap.utils 辅助函数 (clamp/mapRange/random)", "en": "gsap.utils helpers — clamp/mapRange/random/snap"},
+    "impeccable": {"zh": "前端审查/精修/打磨 (audit/critique/polish/harden)", "en": "Frontend audit/critique/polish/harden/animate suite"},
+    "kami": {"zh": "精排 PDF/落地页/简历/白皮书/幻灯片", "en": "Typeset premium PDF/landing/resume/white paper/slides"},
+    "transcribe": {"zh": "音视频转文字,支持说话人分离", "en": "Transcribe audio/video with optional speaker diarization"},
+    "pdf": {"zh": "PDF 读取/生成/审阅 (reportlab/pdfplumber/pypdf)", "en": "PDF read/generate/review via reportlab/pdfplumber/pypdf"},
+    "redesign-existing-projects": {"zh": "现有网站/应用高端化改造", "en": "Redesign existing sites/apps to premium quality"},
+
+    # 🔥 Multi-Modal Generator (8)
+    "asset-forge": {"zh": "本地批量素材处理 (去背景/矢量化/WebP/WebM)", "en": "Local batch asset processing — bg removal/SVG/WebP/WebM"},
+    "notion-meeting-intelligence": {"zh": "结合 Notion 上下文准备会议材料", "en": "Prepare meeting materials from Notion context"},
+    "frontend-design": {"zh": "从零生成高质感前端页面/组件", "en": "Generate distinctive production-grade frontend UI"},
+    "hatch-pet": {"zh": "从美术稿生成 Codex 动画宠物精灵图", "en": "Build Codex animated pet spritesheets from art"},
+    "jupyter-notebook": {"zh": "创建/编辑 Jupyter notebook", "en": "Create or edit Jupyter notebooks from templates"},
+    "drawio": {"zh": "可编辑 .drawio 图表 (架构图/流程图)", "en": "Editable .drawio diagrams — architecture / workflow / flowchart"},
+    "pixel2motion": {"zh": "位图 logo → 极简 SVG → 动画 HTML", "en": "Raster logo → minimal SVG → animated HTML reveal"},
+    "speech": {"zh": "OpenAI TTS 文本转语音/旁白", "en": "OpenAI TTS narration/voiceover via bundled CLI"},
+
+    # ⚡ Action Executor (18)
+    "figma-generate-design": {"zh": "从代码/描述在 Figma 里搭建整页/整屏", "en": "Build full pages/screens in Figma from code or spec"},
+    "figma-use": {"zh": "每次 use_figma 写操作强制前置 skill", "en": "MANDATORY prereq skill before every use_figma call"},
+    "figma-create-new-file": {"zh": "新建空白 Figma/FigJam 文件", "en": "Create a new blank Figma or FigJam file"},
+    "notion-spec-to-implementation": {"zh": "Notion 规格 → 实施计划 + 任务", "en": "Turn Notion specs into implementation plans and tasks"},
+    "codex-sessions-manager": {"zh": "本地 Codex 会话审计/清理/删除/恢复", "en": "Audit / clean / delete / restore local Codex sessions"},
+    "enable-1m-context": {"zh": "Codex 打开 1M token 上下文", "en": "Enable/repair 1M token context for Codex Desktop/CLI"},
+    "figma-generate-library": {"zh": "在 Figma 里从代码库反推建设计系统", "en": "Build Figma design system reverse-engineered from codebase"},
+    "gh-fix-ci": {"zh": "修 GitHub Actions PR 检查失败", "en": "Debug and fix failing GitHub Actions PR checks"},
+    "letta-fleet-management": {"zh": "kubectl 风格声明式管理 Letta 智能体舰队", "en": "Declarative kubectl-style Letta agent fleet management"},
+    "notion-knowledge-capture": {"zh": "对话/决议沉淀到 Notion 结构化页面", "en": "Capture conversations/decisions into structured Notion pages"},
+    "cloudflare-deploy": {"zh": "部署到 Cloudflare Workers/Pages", "en": "Deploy to Cloudflare Workers/Pages and related services"},
+    "netlify-deploy": {"zh": "通过 Netlify CLI 部署站点", "en": "Deploy web projects to Netlify via CLI"},
+    "render-deploy": {"zh": "部署到 Render 云", "en": "Deploy applications to Render via Blueprints"},
+    "vercel-deploy": {"zh": "部署到 Vercel", "en": "Deploy applications and websites to Vercel"},
+    "linear": {"zh": "在 Linear 里管理 issue/项目/工单", "en": "Manage Linear issues, projects and team workflows"},
+    "gh-address-comments": {"zh": "处理当前分支 PR 的评审意见", "en": "Address GitHub PR review/issue comments via gh CLI"},
+    "migrate-to-codex": {"zh": "把指令/skill/agent/MCP 迁到 Codex", "en": "Migrate instructions/skills/agents/MCP config into Codex"},
+    "yeet": {"zh": "一条龙 stage→commit→push→开 PR", "en": "One-shot stage/commit/push and open PR via gh"},
+
+    # 🛠 Integration Utility (23)
+    "media-ai-routing": {"zh": "视频翻译/TTS/克隆/短视频流水线的路由决策", "en": "Route video translation/TTS/cloning/short-video pipelines"},
+    "chatgpt-apps": {"zh": "构建 ChatGPT Apps SDK 应用 (MCP + widget UI)", "en": "Build ChatGPT Apps SDK apps — MCP server + widget UI"},
+    "karpathy-guidelines": {"zh": "严谨编码行为准则 (明确假设/最小 diff/可验证)", "en": "Rigorous coding guidelines — assumptions, minimal diff, verifiable"},
+    "security-best-practices": {"zh": "语言/框架的安全最佳实践审查", "en": "Language/framework-specific security best-practice review"},
+    "creating-letta-code-channels": {"zh": "构建 Letta Code 渠道适配器 (TG/Slack/Discord)", "en": "Build Letta Code channel adapters — TG/Slack/Discord/etc"},
+    "figma-create-design-system-rules": {"zh": "生成项目定制的设计系统规则", "en": "Generate custom design system rules for the codebase"},
+    "letta-filesystem-to-memfs": {"zh": "把 Letta Filesystem 迁到 MemFS", "en": "Migrate deprecated Letta Filesystem to MemFS with lexical search"},
+    "letta-conversations-api": {"zh": "Letta 会话 API 管理独立消息线程", "en": "Manage isolated message threads via Letta Conversations API"},
+    "letta-development-guide": {"zh": "Letta 智能体开发全流程指南", "en": "Full guide for developing Letta agents end to end"},
+    "my-auto-compact": {"zh": "会话压缩前保存 handoff 快照", "en": "Save handoff snapshot before session context compaction"},
+    "aspnet-core": {"zh": "ASP.NET Core Web 应用开发/审查/重构", "en": "Build, review, refactor ASP.NET Core web applications"},
+    "cli-creator": {"zh": "从 API/OpenAPI/curl/SDK 生成可组合 CLI", "en": "Generate composable CLI from API/OpenAPI/curl/SDK"},
+    "compaction-prompts": {"zh": "配置 Letta 智能体压缩/摘要 prompt", "en": "Configure Letta agent compaction and summarization prompts"},
+    "letta-configuration": {"zh": "配置 Letta 智能体的 LLM 提供方/模型", "en": "Configure Letta agent LLM models and providers"},
+    "my-compact": {"zh": "从 handoff 生成运行时压缩摘要", "en": "Turn handoff file into concise runtime summary"},
+    "winui-app": {"zh": "WinUI 3 桌面应用开发 (C# + Windows App SDK)", "en": "Build modern WinUI 3 desktop apps with C# and Windows App SDK"},
+    "playwright": {"zh": "终端里驱动真实浏览器做自动化", "en": "Automate a real browser from terminal via playwright-cli"},
+    "skillforge": {"zh": "跨 agent 技能闭环管理 (本工具自身)", "en": "Cross-agent skill discovery/install/manage (this tool)"},
+    "design-taste-frontend": {"zh": "反 slop 的前端 skill,避免模板脸", "en": "Anti-slop frontend skill — avoids templated look"},
+    "importing-chatgpt-memory": {"zh": "把 ChatGPT 记忆导入 Letta", "en": "Clone ChatGPT saved memory into Letta with enrichment"},
+    "letta-api-client": {"zh": "用 Letta API 构建持久化智能体应用", "en": "Build persistent agent apps with the Letta API"},
+    "define-goal": {"zh": "帮用户在开工前定义可量化目标", "en": "Define concrete measurable goals before starting work"},
+    "playwright-interactive": {"zh": "Electron/浏览器交互式 UI 调试", "en": "Persistent browser/Electron interactive UI debugging"},
+
+    # 🚫 Native Infra (1)
+    "screenshot": {"zh": "OS 级桌面/窗口/区域截图", "en": "OS-level desktop/window/region screenshot capture"},
+}
+
+
+def brief_for(name: str, description: str, lang: str = "zh") -> str:
+    """一句紧凑释义。字典命中直接返回,否则从原描述截首句。"""
+    entry = _BRIEF_TRANSLATIONS.get(name)
+    if entry and lang in entry:
+        return entry[lang]
+    # Fallback: 取原 description 首句(截断)
+    text = (description or "").strip()
+    if not text:
+        return "(no description)" if lang == "en" else "(无描述)"
+    for sep in ["。", ". ", "; ", "。 "]:
+        if sep in text:
+            text = text.split(sep, 1)[0]
+            break
+    limit = 80 if lang == "zh" else 100
+    return text[:limit] + ("…" if len(text) > limit else "")
+
+
 # MECE 分类规则:name/description 中命中关键词 → 对应类
 # 顺序 = 优先级(强特征在前,泛特征在后)。默认落 integration_utility。
 _MECE_RULES = [
@@ -1693,9 +1802,10 @@ def usage_count(name: str) -> int:
 
 
 
-def generate_catalog(out_path=None) -> Path:
-    """生成/更新 CATALOG.md:全部已装 skill 的完整目录。
-    包含三段(普通/已定制/被遮蔽)+ 每个 skill 完整 description + 来源 + 版本快照状态。
+def generate_catalog(out_path=None, brief=None) -> Path:
+    """生成/更新 CATALOG.md:全部已装 skill 的目录。
+    brief=True 时输出紧凑格式(英文名 + 一句中/英释义,用户 v9.1 默认);
+    brief=False 输出完整原描述;brief=None 走 SKILLFORGE_BRIEF env(默认 True)。
     自动在所有 mutation 操作(install/uninstall/modify/consolidate/self-install)末尾被调用。
     """
     import datetime as _dt
@@ -1708,47 +1818,58 @@ def generate_catalog(out_path=None) -> Path:
     out.parent.mkdir(parents=True, exist_ok=True)
 
     now = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    # 支持双语标签(默认 zh,可通过 lang 参数或 SKILLFORGE_LANG env 覆盖)
-    lang = out_path if False else "zh"  # placeholder
     lang_env = os.environ.get("SKILLFORGE_LANG", "").lower()
     if lang_env in ("zh", "en"):
         lang = lang_env
     else:
         lang = detect_lang()
 
+    # brief 默认走 env(未设时 True);显式参数最高优先
+    if brief is None:
+        brief_env = os.environ.get("SKILLFORGE_BRIEF", "1").lower()
+        brief = brief_env not in ("0", "false", "no", "off")
+
+    mode_tag_zh = "紧凑模式" if brief else "完整模式"
+    mode_tag_en = "brief mode" if brief else "full mode"
     header = {
         "zh": ("# SkillForge 本地技能目录",
-               f"> 自动生成于 {now} · 按 MECE 5+1 分类 · **不要手工编辑**(每次 install/uninstall/modify 都会重写)",
+               f"> 自动生成于 {now} · 按 MECE 5+1 分类 · {mode_tag_zh} · **不要手工编辑**(每次 install/uninstall/modify 都会重写)",
                f"🟢 普通 **{len(regular)}** · 🟡 已定制 **{len(custom)}** · ⚪ 被遮蔽 **{len(shadowed)}** · 合计 **{len(skills)}**"),
         "en": ("# SkillForge Local Skill Catalog",
-               f"> Auto-generated at {now} · MECE 5+1 classification · **Do not edit**(rewritten on each install/uninstall/modify)",
+               f"> Auto-generated at {now} · MECE 5+1 classification · {mode_tag_en} · **Do not edit** (rewritten on each install/uninstall/modify)",
                f"🟢 Regular **{len(regular)}** · 🟡 Customized **{len(custom)}** · ⚪ Shadowed **{len(shadowed)}** · Total **{len(skills)}**"),
     }[lang]
     lines = [header[0], "", header[1], "", header[2], "", "---", ""]
 
-    # 按 MECE 5+1 分组
     from collections import defaultdict
     by_mece = defaultdict(list)
     for s in regular:
         key = mece_category_cached(s.name, {"name": s.name, "description": s.description})
         by_mece[key].append(s)
 
-    def _render_one(s, customized=False):
+    def _ver_short(name: str) -> str:
+        ver_root = Path(SKILLFORGE_VERSIONS).expanduser() / name
+        bits = []
+        if (ver_root / "pristine").exists(): bits.append("🟢")
+        if (ver_root / "previous").exists(): bits.append("🟡")
+        bits.append("🔵")
+        return "".join(bits)
+
+    def _render_brief(s, customized=False):
         marker = "✨ " if customized else ""
-        ver_root = Path(SKILLFORGE_VERSIONS).expanduser() / s.name
-        version_bits = []
-        if (ver_root / "pristine").exists(): version_bits.append("🟢")
-        if (ver_root / "previous").exists(): version_bits.append("🟡")
-        version_bits.append("🔵")
-        ver_short = "".join(version_bits)
+        return [f"- **{marker}{s.name}** <sub>{_ver_short(s.name)}</sub> — {brief_for(s.name, s.description, lang)}"]
+
+    def _render_full(s, customized=False):
+        marker = "✨ " if customized else ""
         return [
-            f"#### {marker}{s.name}  <sub>{ver_short}</sub>",
+            f"#### {marker}{s.name}  <sub>{_ver_short(s.name)}</sub>",
             "",
             f"{s.description or '_(无描述)_'}",
             "",
         ]
 
-    # MECE 5 类按固定顺序输出(先业务后隔离)
+    _render_one = _render_brief if brief else _render_full
+
     mece_order = ["data_fetcher", "content_transformer", "multi_modal_generator",
                   "action_executor", "integration_utility", "native_infra"]
     for key in mece_order:
@@ -1760,7 +1881,6 @@ def generate_catalog(out_path=None) -> Path:
         hint = mece_hint(key, lang)
         lines.append(f"## {label}  ({len(members)})")
         lines.append("")
-        # 类头显示"数据契约 / 编排建议"元信息
         if lang == "zh":
             lines.append(f"> **数据契约**:{contract}  ·  **编排建议**:{hint}")
         else:
@@ -1769,6 +1889,7 @@ def generate_catalog(out_path=None) -> Path:
         members = _sort_by_priority(members)
         for s in members:
             lines.extend(_render_one(s, customized=False))
+        lines.append("")
         lines.append("---")
         lines.append("")
 
@@ -1778,6 +1899,7 @@ def generate_catalog(out_path=None) -> Path:
         lines.append("")
         for s in _sort_by_priority(custom):
             lines.extend(_render_one(s, customized=True))
+        lines.append("")
         lines.append("---")
         lines.append("")
 
@@ -3496,13 +3618,17 @@ def build_parser():
                     help="输出语言(zh/en/auto,auto 会看 CJK/LANG env)")
     pl.set_defaults(func=cmd_list)
 
-    pcat = sub.add_parser("catalog", help="手动重生成 CATALOG.md")
+    pcat = sub.add_parser("catalog", help="手动重生成 CATALOG.md (默认紧凑模式)")
     pcat.add_argument("--path", help="覆盖输出位置")
     pcat.add_argument("--lang", choices=["zh", "en"], help="输出语言(默认按 SKILLFORGE_LANG env 或 LANG)")
+    pcat.add_argument("--brief", dest="brief", action="store_true", default=None,
+                      help="紧凑格式:英文名 + 一句中/英释义(默认)")
+    pcat.add_argument("--full", dest="brief", action="store_false",
+                      help="完整格式:每 skill 输出原 description 全文")
     def _do_catalog(a):
         if a.lang:
             os.environ["SKILLFORGE_LANG"] = a.lang
-        print(f"📜 写入 {generate_catalog(a.path)}")
+        print(f"📜 写入 {generate_catalog(a.path, brief=a.brief)}")
     pcat.set_defaults(func=_do_catalog)
 
     pw = sub.add_parser("which", help="查本地有没有能满足需求的技能")

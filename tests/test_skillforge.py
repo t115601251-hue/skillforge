@@ -623,6 +623,87 @@ class TestDetectLang(unittest.TestCase):
         self.assertIn(r, ("zh", "en"))
 
 
+class TestBrief(unittest.TestCase):
+    """v9.1: _BRIEF_TRANSLATIONS 字典 + brief_for() + generate_catalog brief 模式."""
+
+    def test_dict_covers_core_skills(self):
+        """核心 74 项 skill 每个都要有 zh + en 释义(避免 fallback 截原描述)。"""
+        must_have = [
+            "figma", "sentry", "openai-docs", "navigating-chatgpt-history",
+            "markitdown-convert", "transcribe", "pdf", "impeccable", "kami",
+            "asset-forge", "frontend-design", "speech", "drawio", "pixel2motion",
+            "vercel-deploy", "netlify-deploy", "cloudflare-deploy", "render-deploy",
+            "yeet", "gh-fix-ci", "gh-address-comments", "linear",
+            "figma-use", "figma-implement-design",
+            "skillforge", "playwright", "karpathy-guidelines",
+            "screenshot",
+        ]
+        for name in must_have:
+            with self.subTest(skill=name):
+                self.assertIn(name, skillforge._BRIEF_TRANSLATIONS, f"{name} 缺 brief 字典条目")
+                entry = skillforge._BRIEF_TRANSLATIONS[name]
+                self.assertIn("zh", entry, f"{name} 缺中文 brief")
+                self.assertIn("en", entry, f"{name} 缺英文 brief")
+                self.assertTrue(entry["zh"].strip(), f"{name} 中文 brief 为空")
+                self.assertTrue(entry["en"].strip(), f"{name} 英文 brief 为空")
+
+    def test_brief_length_bounded(self):
+        """所有中文 brief ≤ 45 字,英文 ≤ 100 字符(防长描述潜入)。"""
+        for name, entry in skillforge._BRIEF_TRANSLATIONS.items():
+            with self.subTest(skill=name):
+                self.assertLessEqual(len(entry["zh"]), 45, f"{name} 中文 brief 超长")
+                self.assertLessEqual(len(entry["en"]), 100, f"{name} 英文 brief 超长")
+
+    def test_brief_for_dict_hit(self):
+        self.assertEqual(
+            skillforge.brief_for("figma", "long english desc...", "zh"),
+            skillforge._BRIEF_TRANSLATIONS["figma"]["zh"],
+        )
+        self.assertEqual(
+            skillforge.brief_for("figma", "long english desc...", "en"),
+            skillforge._BRIEF_TRANSLATIONS["figma"]["en"],
+        )
+
+    def test_brief_for_fallback_truncates(self):
+        # 字典没命中,fallback 走原描述截首句
+        long = "第一句话很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长。第二句"
+        out = skillforge.brief_for("unknown-skill-xyz", long, "zh")
+        self.assertTrue(out.endswith("…") or len(out) <= 80)
+        self.assertNotIn("第二句", out)
+
+    def test_brief_for_empty_desc(self):
+        self.assertIn(skillforge.brief_for("unknown-skill", "", "zh"), ("(无描述)", "(no description)"))
+        self.assertIn(skillforge.brief_for("unknown-skill", "", "en"), ("(无描述)", "(no description)"))
+
+    def test_catalog_brief_mode_shape(self):
+        """生成 brief CATALOG 到临时路径,检查它是紧凑格式:含分类头 + 一行式 skill 条目 + 不含长描述段落。"""
+        import tempfile, pathlib
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "CATALOG_test.md"
+            skillforge.generate_catalog(out_path=str(path), brief=True)
+            content = path.read_text(encoding="utf-8")
+            # 头部标记
+            self.assertIn("紧凑模式", content)
+            # MECE 类头(至少 Data Fetcher 类应该出现)
+            self.assertIn("数据感知与检索", content)
+            self.assertIn("数据契约", content)
+            # 一行式条目格式
+            self.assertRegex(content, r"- \*\*\S+\*\* <sub>[🟢🟡🔵]+</sub> — ")
+            # 不能出现原描述典型长文本(检 markitdown 的英文长句)
+            self.assertNotIn("Convert files and URLs into clean Markdown for LLM ingestion", content)
+
+    def test_catalog_full_mode_still_works(self):
+        """--full 保留完整描述路径,不能被 brief 抢走。"""
+        import tempfile, pathlib
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "CATALOG_full.md"
+            skillforge.generate_catalog(out_path=str(path), brief=False)
+            content = path.read_text(encoding="utf-8")
+            self.assertIn("完整模式", content)
+            # 完整模式下每 skill 用 #### 四级标题
+            self.assertIn("####", content)
+
+
 class TestCategorize(unittest.TestCase):
     """v8: skill 分类规则匹配 + cache。"""
     def test_letta_prefix_wins(self):
